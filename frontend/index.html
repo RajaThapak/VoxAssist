@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoxAssist — Real-Time Voice IT Helpdesk Agent</title>
+    <meta name="description" content="Real-time, interruptible voice IT helpdesk agent with state-driven robot face visual feedback.">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Top Header Navbar -->
+        <header class="top-header">
+            <div class="brand">
+                <div class="logo-icon">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                        <line x1="4" y1="10" x2="4" y2="14"/>
+                        <line x1="8" y1="6" x2="8" y2="18"/>
+                        <line x1="12" y1="3" x2="12" y2="21"/>
+                        <line x1="16" y1="7" x2="16" y2="17"/>
+                        <line x1="20" y1="10" x2="20" y2="14"/>
+                    </svg>
+                </div>
+                <div class="brand-text">
+                    <h1>VoxAssist</h1>
+                    <span class="tagline">Real-Time Voice IT Agent</span>
+                </div>
+            </div>
+
+            <div class="header-status">
+                <div class="user-chip">
+                    <div class="user-avatar">AJ</div>
+                    <div class="user-meta">
+                        <span class="user-name">Alex Johnson</span>
+                        <span class="device-tag">Windows IT Laptop</span>
+                    </div>
+                </div>
+                <div class="conn-status" id="connStatus">
+                    <span class="status-indicator"></span>
+                    <span class="status-text">Disconnected</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content Card -->
+        <main class="content-card">
+            <div class="robot-stage">
+                <div class="face-glow-container" id="faceGlow">
+                    <!-- SVG Robot Face Interface -->
+                    <svg id="robotFaceSvg" class="robot-face-svg" viewBox="0 0 400 400" preserveAspectRatio="xMidYMid meet">
+                        <defs>
+                            <linearGradient id="headGradient" x1="0%" y1="0%" x2="10%" y2="100%">
+                                <stop offset="0%" stop-color="#fbfbfc"/>
+                                <stop offset="60%" stop-color="#eef1f5"/>
+                                <stop offset="100%" stop-color="#dce1e8"/>
+                            </linearGradient>
+                            <linearGradient id="earGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stop-color="#f2f4f7"/>
+                                <stop offset="100%" stop-color="#d3d9e0"/>
+                            </linearGradient>
+                            <radialGradient id="ledGlow" cx="50%" cy="35%" r="65%">
+                                <stop offset="0%" stop-color="#c8fcff"/>
+                                <stop offset="55%" stop-color="#2fe0f5"/>
+                                <stop offset="100%" stop-color="#0fb8d6"/>
+                            </radialGradient>
+                            <filter id="ledSoftGlow" x="-120%" y="-120%" width="340%" height="340%">
+                                <feGaussianBlur stdDeviation="6" result="blur"/>
+                                <feMerge>
+                                    <feMergeNode in="blur"/>
+                                    <feMergeNode in="SourceGraphic"/>
+                                </feMerge>
+                            </filter>
+                            <filter id="headShadow" x="-30%" y="-20%" width="160%" height="150%">
+                                <feDropShadow dx="0" dy="9" stdDeviation="10" flood-color="#94a8c2" flood-opacity="0.32"/>
+                            </filter>
+                        </defs>
+
+                        <g id="robotRig" filter="url(#headShadow)">
+                            <!-- Antenna -->
+                            <line x1="200" y1="98" x2="200" y2="60" stroke="#c7cfd9" stroke-width="5" stroke-linecap="round"/>
+                            <circle id="antennaTip" cx="200" cy="54" r="7" fill="url(#ledGlow)" filter="url(#ledSoftGlow)" />
+
+                            <!-- Side Ear Modules -->
+                            <rect id="leftEar" class="ear-module" x="64" y="165" width="22" height="58" rx="11" fill="url(#earGradient)" stroke="#c3cbd6" stroke-width="2" />
+                            <rect id="rightEar" class="ear-module" x="314" y="165" width="22" height="58" rx="11" fill="url(#earGradient)" stroke="#c3cbd6" stroke-width="2" />
+
+                            <!-- Head Shell -->
+                            <rect x="95" y="95" width="210" height="210" rx="56" class="face-outline" fill="url(#headGradient)" stroke="#c7cfd9" stroke-width="3" />
+                            <!-- Gloss highlight -->
+                            <ellipse cx="155" cy="130" rx="52" ry="16" fill="#ffffff" opacity="0.5" />
+
+                            <!-- Face Panel -->
+                            <rect id="facePanel" x="120" y="136" width="160" height="128" rx="38" fill="#20242c" />
+
+                            <!-- Robot Left Eye (vertical LED pill) -->
+                            <g id="leftEyeGroup" class="eye-group" transform="translate(175, 190)">
+                                <rect id="leftPupil" class="eye-led" x="-8" y="-15" width="16" height="30" rx="8" fill="url(#ledGlow)" filter="url(#ledSoftGlow)" />
+                            </g>
+
+                            <!-- Robot Right Eye (vertical LED pill) -->
+                            <g id="rightEyeGroup" class="eye-group" transform="translate(225, 190)">
+                                <rect id="rightPupil" class="eye-led" x="-8" y="-15" width="16" height="30" rx="8" fill="url(#ledGlow)" filter="url(#ledSoftGlow)" />
+                            </g>
+
+                            <!-- Robot Mouth (horizontal LED pill, audio-reactive) -->
+                            <g id="mouthGroup" transform="translate(200, 225)">
+                                <rect id="mouthPath" class="mouth-led" x="-17" y="-5" width="34" height="10" rx="5" fill="url(#ledGlow)" filter="url(#ledSoftGlow)" />
+                            </g>
+                        </g>
+                    </svg>
+                </div>
+
+                <!-- State Badge Pill -->
+                <div class="state-pill" id="statePill">
+                    <span class="state-dot" id="stateDot"></span>
+                    <span class="state-label" id="stateLabel">Session IDLE</span>
+                </div>
+
+                <!-- Live Speech Caption Overlay -->
+                <div class="caption-container" id="captionContainer">
+                    <p class="caption-text" id="captionText">Tap the microphone to start your IT helpdesk session...</p>
+                    <p class="caption-subtext">Ready for your query.</p>
+                </div>
+            </div>
+
+            <!-- Interactive Input Bar (type instead of speak) -->
+            <div class="chat-input-bar">
+                <input type="text" id="userInput" placeholder="Or type your IT issue here..." disabled autocomplete="off">
+                <button id="sendBtn" class="send-button" disabled title="Send Message">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                    </svg>
+                </button>
+            </div>
+
+            <!-- Bottom Controls -->
+            <div class="controls-bar">
+                <button id="micBtn" class="mic-button" aria-label="Start Voice Session">
+                    <svg class="mic-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                        <line x1="12" y1="19" x2="12" y2="22"/>
+                    </svg>
+                    <span id="micBtnText">Start Session</span>
+                </button>
+
+                <button id="ticketsBtn" class="action-button tickets-btn" title="View Escalated Tickets">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                    </svg>
+                    <span>Tickets</span>
+                </button>
+
+                <button id="interruptBtn" class="action-button interrupt-btn" disabled title="Simulate Mid-Sentence Interruption (Barge-In)">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                        <line x1="23" y1="9" x2="17" y2="15"></line>
+                        <line x1="17" y1="9" x2="23" y2="15"></line>
+                    </svg>
+                    <span>Interrupt Agent</span>
+                </button>
+            </div>
+        </main>
+
+        <!-- Tickets Modal Drawer -->
+        <div id="ticketsModal" class="modal-overlay" hidden>
+            <div class="modal-card">
+                <div class="modal-header">
+                    <h2>Escalated IT Support Tickets</h2>
+                    <button id="closeTicketsBtn" class="close-btn">&times;</button>
+                </div>
+                <div class="modal-body" id="ticketsList">
+                    <p class="empty-state">No tickets escalated yet.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

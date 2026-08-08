@@ -1,0 +1,671 @@
+// VoxAssist Frontend Application Logic
+
+let ws = null;
+let isSessionActive = false;
+let currentSessionId = null;
+let speechRecognition = null;
+let isListeningSpeech = false;
+let isSpeakingAudio = false;
+let lastBotSpokenText = "";
+let pendingSessionEnd = false;
+let mouthCloseTimer = null;
+
+// Real Rime audio playback + waveform-driven lip sync
+let ttsAudioEl = null;
+let audioCtx = null;
+let analyserNode = null;
+let analyserData = null;
+let lipSyncRAF = null;
+
+// Playback queue for streamed speech segments (sentences arrive and get spoken
+// one at a time, in order, as soon as each is ready — instead of waiting for
+// the whole reply before anything plays).
+let ttsQueue = [];
+let ttsStreamEnded = false;
+let isPlayingQueue = false;
+
+// DOM Elements
+const micBtn = document.getElementById('micBtn');
+const micBtnText = document.getElementById('micBtnText');
+const interruptBtn = document.getElementById('interruptBtn');
+const ticketsBtn = document.getElementById('ticketsBtn');
+const ticketsModal = document.getElementById('ticketsModal');
+const closeTicketsBtn = document.getElementById('closeTicketsBtn');
+const ticketsList = document.getElementById('ticketsList');
+
+const userInput = document.getElementById('userInput');
+const sendBtn = document.getElementById('sendBtn');
+
+const connStatus = document.getElementById('connStatus');
+const faceGlow = document.getElementById('faceGlow');
+const statePill = document.getElementById('statePill');
+const stateDot = document.getElementById('stateDot');
+const stateLabel = document.getElementById('stateLabel');
+const captionText = document.getElementById('captionText');
+
+const leftPupil = document.getElementById('leftPupil');
+const rightPupil = document.getElementById('rightPupil');
+const mouthPath = document.getElementById('mouthPath');
+
+// Colors for the status-pill badge (does not affect the robot's LEDs, which stay cyan)
+const STATE_COLORS = {
+    idle: '#94a3b8',
+    listening: '#14b8e8',
+    thinking: '#f59e0b',
+    speaking: '#8b5cf6',
+    interrupted: '#ef4444',
+    escalating: '#eab308'
+};
+
+// Eyes are vertical LED pills — resize height (keeping them centered) to change expression.
+function setEyeHeight(height) {
+    leftPupil.setAttribute('height', height);
+    leftPupil.setAttribute('y', -height / 2);
+    rightPupil.setAttribute('height', height);
+    rightPupil.setAttribute('y', -height / 2);
+}
+
+// Mouth is a horizontal LED pill — resize width/height (keeping it centered) to change shape.
+function setMouthPill(width, height) {
+    mouthPath.setAttribute('width', width);
+    mouthPath.setAttribute('height', height);
+    mouthPath.setAttribute('x', -width / 2);
+    mouthPath.setAttribute('y', -height / 2);
+    mouthPath.setAttribute('rx', height / 2);
+}
+
+// Per-state resting expression: eye pill height + closed-mouth pill size.
+// Continuous pulsing/breathing/tilt animation is handled declaratively in CSS via the state class.
+const EXPRESSIONS = {
+    idle: { eyeHeight: 30, mouthWidth: 34, mouthHeight: 10 },
+    listening: { eyeHeight: 36, mouthWidth: 30, mouthHeight: 9 },
+    thinking: { eyeHeight: 24, mouthWidth: 26, mouthHeight: 8 },
+    speaking: { eyeHeight: 30, mouthWidth: 30, mouthHeight: 10 },
+    interrupted: { eyeHeight: 40, mouthWidth: 20, mouthHeight: 8 },
+    escalating: { eyeHeight: 30, mouthWidth: 30, mouthHeight: 10 }
+};
+
+function applyExpression(state) {
+    const expr = EXPRESSIONS[state] || EXPRESSIONS.idle;
+    setEyeHeight(expr.eyeHeight);
+    setMouthPill(expr.mouthWidth, expr.mouthHeight);
+}
+
+// Multi-language support — no manual toggle. Language is auto-detected from text
+// (Unicode script for non-Latin languages) and the speech recognizer / TTS voice
+// silently follow whichever language the conversation is currently in.
+let conversationLang = 'en-US';
+
+const SCRIPT_LANG_RANGES = [
+    { lang: 'hi-IN', re: /[ऀ-ॿ]/ },  // Devanagari (Hindi, Marathi, ...)
+    { lang: 'bn-IN', re: /[ঀ-৿]/ },  // Bengali
+    { lang: 'ta-IN', re: /[஀-௿]/ },  // Tamil
+    { lang: 'te-IN', re: /[ఀ-౿]/ },  // Telugu
+    { lang: 'ar-SA', re: /[؀-ۿ]/ },  // Arabic
+    { lang: 'he-IL', re: /[֐-׿]/ },  // Hebrew
+    { lang: 'ru-RU', re: /[Ѐ-ӿ]/ },  // Cyrillic (Russian, ...)
+    { lang: 'el-GR', re: /[Ͱ-Ͽ]/ },  // Greek
+    { lang: 'th-TH', re: /[฀-๿]/ },  // Thai
+    { lang: 'zh-CN', re: /[一-鿿]/ },  // CJK Unified (Chinese)
+    { lang: 'ja-JP', re: /[぀-ヿ]/ },  // Hiragana / Katakana (Japanese)
+    { lang: 'ko-KR', re: /[가-힯]/ }   // Hangul (Korean)
+];
+
+// Latin-script languages (Spanish, French, German, ...) can't be told apart from
+// English by character set alone — they default to English recognition/voice.
+function detectTextLang(text) {
+    for (const { lang, re } of SCRIPT_LANG_RANGES) {
+        if (re.test(text)) return lang;
+    }
+    return 'en-US';
+}
+
+// Preferred named voices per language (falls back to any matching-language voice if absent)
+const PREFERRED_VOICE_NAMES = {
+    'en-US': ['Google UK English Female', 'Google US English', 'Microsoft Zira', 'Microsoft Hazel', 'Microsoft Aria', 'Microsoft Jenny', 'Samantha', 'Victoria', 'Karen', 'Moira', 'Tessa'],
+    'hi-IN': ['Google हिन्दी', 'Microsoft Swara', 'Microsoft Kalpana', 'Microsoft Heera', 'Lekha']
+};
+
+let voiceCache = {};
+
+function resetVoiceCache() {
+    voiceCache = {};
+}
+
+function pickVoiceForLang(lang) {
+    if (lang in voiceCache) return voiceCache[lang];
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices.length) return null;
+
+    const langPrefix = lang.split('-')[0].toLowerCase();
+    let match = null;
+
+    for (const name of (PREFERRED_VOICE_NAMES[lang] || [])) {
+        match = voices.find(v => v.name.includes(name));
+        if (match) break;
+    }
+    if (!match) match = voices.find(v => v.lang.toLowerCase() === lang.toLowerCase() && /female/i.test(v.name));
+    if (!match) match = voices.find(v => v.lang.toLowerCase().startsWith(langPrefix) && /female/i.test(v.name));
+    if (!match) match = voices.find(v => v.lang.toLowerCase().startsWith(langPrefix));
+
+    voiceCache[lang] = match || null;
+    return voiceCache[lang];
+}
+
+if ('speechSynthesis' in window) {
+    resetVoiceCache();
+    window.speechSynthesis.onvoiceschanged = resetVoiceCache;
+}
+
+// Words to ignore from microphone speaker feedback
+const GREETING_BLACK_LIST = [
+    "voxassist", "helpdesk agent", "running into today", "hi alex",
+    "what issue are you", "what issue", "running into", "helpdesk"
+];
+
+// Initialize App
+document.addEventListener('DOMContentLoaded', () => {
+    initEvents();
+    initSpeechRecognition();
+    startEyeBlinkLoop();
+    startMouseEyeTracking();
+});
+
+function initEvents() {
+    micBtn.addEventListener('click', toggleSession);
+    interruptBtn.addEventListener('click', triggerBargeIn);
+    ticketsBtn.addEventListener('click', loadAndShowTickets);
+    closeTicketsBtn.addEventListener('click', () => ticketsModal.hidden = true);
+    
+    sendBtn.addEventListener('click', handleUserTextInput);
+    userInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') handleUserTextInput();
+    });
+}
+
+function handleUserTextInput() {
+    const text = userInput.value.trim();
+    if (text && ws && ws.readyState === WebSocket.OPEN) {
+        if (isSpeakingAudio) {
+            triggerBargeIn();
+        }
+
+        conversationLang = detectTextLang(text);
+        captionText.textContent = `You: "${text}"`;
+        ws.send(JSON.stringify({
+            type: 'user_speech',
+            text: text
+        }));
+        userInput.value = '';
+    }
+}
+
+// WebSocket Connection
+function connectWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/voxassist`;
+    
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+        connStatus.classList.add('connected');
+        connStatus.querySelector('.status-text').textContent = 'Connected';
+        isSessionActive = true;
+        pendingSessionEnd = false;
+        micBtn.classList.add('active');
+        micBtnText.textContent = 'End Session';
+        interruptBtn.disabled = false;
+        userInput.disabled = false;
+        sendBtn.disabled = false;
+    };
+
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        handleServerEvent(data);
+    };
+
+    ws.onclose = () => {
+        connStatus.classList.remove('connected');
+        connStatus.querySelector('.status-text').textContent = 'Disconnected';
+        isSessionActive = false;
+        micBtn.classList.remove('active');
+        micBtnText.textContent = 'Start Session';
+        interruptBtn.disabled = true;
+        userInput.disabled = true;
+        sendBtn.disabled = true;
+        updateState('idle');
+        stopSpeechListening();
+        window.speechSynthesis.cancel();
+        stopRimeAudio();
+        resetTtsQueue();
+    };
+
+    ws.onerror = (error) => {
+        console.error('WebSocket Error:', error);
+    };
+}
+
+function toggleSession() {
+    if (isSessionActive) {
+        if (ws) ws.close();
+    } else {
+        connectWebSocket();
+    }
+}
+
+// Runs after the agent finishes speaking a normal (non-greeting) turn — either
+// closes the session if one was pending, or goes back to listening.
+function onAgentSpeechComplete() {
+    if (pendingSessionEnd) {
+        pendingSessionEnd = false;
+        captionText.textContent = 'Session ended. Tap Start Session to begin again.';
+        updateState('idle');
+        if (ws) ws.close();
+        return;
+    }
+    updateState('listening');
+    setTimeout(() => startSpeechListening(), 800);
+}
+
+function resetTtsQueue() {
+    ttsQueue = [];
+    ttsStreamEnded = false;
+    isPlayingQueue = false;
+}
+
+// Queues one spoken segment (a sentence, or a whole short reply) and starts
+// playback if nothing is currently playing.
+function enqueueTtsSegment(text, audioBase64, mime) {
+    ttsQueue.push({ text, audioBase64, mime });
+    if (!isPlayingQueue) {
+        playNextInQueue();
+    }
+}
+
+// Plays segments one at a time, in order. Once the queue is empty and no more
+// segments are coming (tts_stream_end already received), the turn is complete.
+function playNextInQueue() {
+    if (ttsQueue.length === 0) {
+        isPlayingQueue = false;
+        if (ttsStreamEnded) {
+            onAgentSpeechComplete();
+        }
+        return;
+    }
+
+    isPlayingQueue = true;
+    const segment = ttsQueue.shift();
+    lastBotSpokenText = segment.text.toLowerCase();
+    captionText.textContent = `VoxAssist: "${segment.text}"`;
+    conversationLang = detectTextLang(segment.text);
+    updateState('speaking');
+
+    if (segment.audioBase64) {
+        playRimeAudio(segment.audioBase64, segment.mime, playNextInQueue);
+    } else {
+        // Rime unavailable/failed for this segment — fall back to the browser's voice.
+        speakBrowserUtterance(segment.text, playNextInQueue);
+    }
+}
+
+// Handle Incoming Server Events
+function handleServerEvent(event) {
+    switch (event.type) {
+        case 'connected':
+            currentSessionId = event.session_id;
+            lastBotSpokenText = event.greeting.toLowerCase();
+            conversationLang = detectTextLang(event.greeting);
+            updateState('speaking');
+            captionText.textContent = `VoxAssist: "${event.greeting}"`;
+            if (event.audio_base64) {
+                playRimeAudio(event.audio_base64, event.mime, () => {
+                    updateState('listening');
+                    setTimeout(() => startSpeechListening(), 1000);
+                });
+            } else {
+                speakBrowserUtterance(event.greeting, () => {
+                    updateState('listening');
+                    setTimeout(() => startSpeechListening(), 1000);
+                });
+            }
+            break;
+
+        // A spoken segment (one sentence, or a whole short reply) is ready — real
+        // Rime audio if synthesis succeeded, text-only (browser voice fallback)
+        // otherwise. Segments are queued and played back-to-back in order, so the
+        // agent can start speaking the first sentence while later ones are still
+        // being generated/synthesized.
+        case 'tts_audio_segment':
+            enqueueTtsSegment(event.text_segment, event.audio_base64, event.mime);
+            break;
+
+        case 'tts_text_segment':
+            enqueueTtsSegment(event.text_segment, null, null);
+            break;
+
+        // No more segments coming for this turn — completion fires once the
+        // queue finishes draining (it may still be playing queued segments).
+        case 'tts_stream_end':
+            ttsStreamEnded = true;
+            if (!isPlayingQueue && ttsQueue.length === 0) {
+                onAgentSpeechComplete();
+            }
+            break;
+
+        case 'session_end':
+            pendingSessionEnd = true;
+            break;
+
+        case 'state_change':
+            updateState(event.state);
+            if (event.state === 'thinking') {
+                resetTtsQueue();
+            }
+            if (event.user_text) {
+                captionText.textContent = `You: "${event.user_text}"`;
+            }
+            if (event.state === 'listening' && !isSpeakingAudio) {
+                setTimeout(() => startSpeechListening(), 500);
+            }
+            break;
+
+        case 'pong':
+            break;
+    }
+}
+
+// Update Robot Face Visual State
+function updateState(state) {
+    faceGlow.className = `face-glow-container ${state}`;
+    applyExpression(state);
+
+    const color = STATE_COLORS[state] || STATE_COLORS.idle;
+    stateDot.style.backgroundColor = color;
+    stateDot.style.boxShadow = `0 0 10px ${color}`;
+    stateLabel.textContent = `Session ${state.toUpperCase()}`;
+
+    if (state === 'speaking') {
+        isSpeakingAudio = true;
+    } else if (state !== 'thinking') {
+        isSpeakingAudio = false;
+    }
+
+    if (state === 'interrupted') {
+        captionText.textContent = '⚡ Interrupted! Listening for your response...';
+        triggerBargeInVisuals();
+    } else if (state === 'escalating') {
+        captionText.textContent = 'Opening an IT Support Escalation Ticket...';
+    }
+}
+
+// Mid-Sentence Interruption (Barge-In)
+function triggerBargeIn() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'barge_in' }));
+        window.speechSynthesis.cancel();
+        stopRimeAudio();
+        resetTtsQueue();
+        isSpeakingAudio = false;
+        updateState('interrupted');
+        setTimeout(() => startSpeechListening(), 500);
+    }
+}
+
+// Brief "snap wide" eye flash on interruption, then settle back to listening size
+function triggerBargeInVisuals() {
+    setEyeHeight(44);
+    setTimeout(() => {
+        setEyeHeight(EXPRESSIONS.listening.eyeHeight);
+    }, 350);
+}
+
+// Lip Sync Audio Amplitude Animation — the mouth LED pill morphs width/height with voice amplitude
+function animateLipSync(amplitude) {
+    const width = 22 + amplitude * 20;
+    const height = 8 + amplitude * 22;
+    setMouthPill(width, height);
+}
+
+// Web Speech API Integration
+function initSpeechRecognition() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+        speechRecognition = new SpeechRecognition();
+        speechRecognition.continuous = true;
+        speechRecognition.interimResults = false;
+
+        speechRecognition.onresult = (event) => {
+            let transcript = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                if (event.results[i].isFinal) {
+                    transcript += event.results[i][0].transcript;
+                }
+            }
+
+            const cleanText = transcript.trim();
+            const lowerClean = cleanText.toLowerCase();
+
+            // Ignore speech while agent is speaking
+            if (cleanText.length > 2 && !isSpeakingAudio) {
+                // Ignore greeting echo or speaker feedback
+                if (GREETING_BLACK_LIST.some(phrase => lowerClean.includes(phrase))) {
+                    console.log('Ignored greeting echo feedback:', cleanText);
+                    return;
+                }
+
+                if (lastBotSpokenText && lowerClean.includes(lastBotSpokenText.slice(-15))) {
+                    console.log('Ignored speaker echo feedback:', cleanText);
+                    return;
+                }
+
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    captionText.textContent = `You: "${cleanText}"`;
+                    ws.send(JSON.stringify({
+                        type: 'user_speech',
+                        text: cleanText
+                    }));
+                }
+            }
+        };
+
+        speechRecognition.onend = () => {
+            isListeningSpeech = false;
+            if (isSessionActive && !isSpeakingAudio) {
+                setTimeout(() => startSpeechListening(), 500);
+            }
+        };
+
+        speechRecognition.onerror = (e) => {
+            console.warn('Speech Recognition Warning:', e.error);
+            isListeningSpeech = false;
+            if (isSessionActive && e.error !== 'aborted' && !isSpeakingAudio) {
+                setTimeout(() => startSpeechListening(), 1000);
+            }
+        };
+    }
+}
+
+function startSpeechListening() {
+    if (speechRecognition && !isListeningSpeech && !isSpeakingAudio) {
+        try {
+            speechRecognition.lang = conversationLang;
+            speechRecognition.start();
+            isListeningSpeech = true;
+        } catch (e) {}
+    }
+}
+
+function stopSpeechListening() {
+    if (speechRecognition && isListeningSpeech) {
+        try {
+            speechRecognition.stop();
+            isListeningSpeech = false;
+        } catch (e) {}
+    }
+}
+
+// Real Rime Audio Playback — plays actual synthesized audio from the backend and
+// drives lip sync from the real waveform via the Web Audio API, instead of guessing.
+function ensureAudioGraph() {
+    if (ttsAudioEl) return;
+    ttsAudioEl = new Audio();
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaElementSource(ttsAudioEl);
+    analyserNode = audioCtx.createAnalyser();
+    analyserNode.fftSize = 256;
+    analyserData = new Uint8Array(analyserNode.frequencyBinCount);
+    source.connect(analyserNode);
+    analyserNode.connect(audioCtx.destination);
+}
+
+function stopRimeAudio() {
+    cancelAnimationFrame(lipSyncRAF);
+    if (ttsAudioEl && !ttsAudioEl.paused) {
+        ttsAudioEl.pause();
+    }
+    animateLipSync(0);
+}
+
+function tickLipSync() {
+    analyserNode.getByteFrequencyData(analyserData);
+    let sum = 0;
+    for (let i = 0; i < analyserData.length; i++) sum += analyserData[i];
+    const amplitude = Math.min(1, (sum / analyserData.length) / 90);
+    animateLipSync(amplitude);
+    lipSyncRAF = requestAnimationFrame(tickLipSync);
+}
+
+function playRimeAudio(base64Audio, mimeType, onCompleteCallback) {
+    ensureAudioGraph();
+    if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+
+    stopSpeechListening();
+    isSpeakingAudio = true;
+
+    const byteArray = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
+    const blob = new Blob([byteArray], { type: mimeType || 'audio/mp3' });
+    const url = URL.createObjectURL(blob);
+
+    const cleanup = () => {
+        cancelAnimationFrame(lipSyncRAF);
+        animateLipSync(0);
+        URL.revokeObjectURL(url);
+        isSpeakingAudio = false;
+    };
+
+    ttsAudioEl.onended = () => {
+        cleanup();
+        if (onCompleteCallback) onCompleteCallback();
+    };
+    ttsAudioEl.onerror = () => {
+        cleanup();
+        if (onCompleteCallback) onCompleteCallback();
+    };
+
+    ttsAudioEl.src = url;
+    ttsAudioEl.play().then(() => {
+        tickLipSync();
+    }).catch((e) => {
+        console.warn('Rime audio playback failed:', e);
+        cleanup();
+        if (onCompleteCallback) onCompleteCallback();
+    });
+}
+
+// Browser Speech Synthesis for Spoken Voice Output
+function speakBrowserUtterance(text, onCompleteCallback) {
+    if ('speechSynthesis' in window) {
+        stopSpeechListening();
+        isSpeakingAudio = true;
+        window.speechSynthesis.cancel();
+        
+        const detectedLang = detectTextLang(text);
+        conversationLang = detectedLang; // primes the recognizer for the user's next turn
+
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = detectedLang;
+        utterance.rate = detectedLang === 'en-US' ? 1.05 : 0.95;
+        utterance.pitch = 1.15;
+        const voice = pickVoiceForLang(detectedLang);
+        if (voice) {
+            utterance.voice = voice;
+        }
+
+        utterance.onboundary = (e) => {
+            if (e.name === 'word') {
+                clearTimeout(mouthCloseTimer);
+                animateLipSync(0.55 + Math.random() * 0.45);
+                mouthCloseTimer = setTimeout(() => animateLipSync(0.05), 110);
+            }
+        };
+
+        utterance.onend = () => {
+            clearTimeout(mouthCloseTimer);
+            animateLipSync(0);
+            isSpeakingAudio = false;
+            if (onCompleteCallback) onCompleteCallback();
+        };
+
+        utterance.onerror = () => {
+            clearTimeout(mouthCloseTimer);
+            animateLipSync(0);
+            isSpeakingAudio = false;
+            if (onCompleteCallback) onCompleteCallback();
+        };
+
+        window.speechSynthesis.speak(utterance);
+    } else {
+        if (onCompleteCallback) onCompleteCallback();
+    }
+}
+
+// Eye Blink & Mouse Tracking Animations
+function startEyeBlinkLoop() {
+    setInterval(() => {
+        if (Math.random() > 0.3) {
+            leftPupil.style.transform = 'scaleY(0.1)';
+            rightPupil.style.transform = 'scaleY(0.1)';
+            setTimeout(() => {
+                leftPupil.style.transform = 'scaleY(1)';
+                rightPupil.style.transform = 'scaleY(1)';
+            }, 80);
+        }
+    }, 4000);
+}
+
+function startMouseEyeTracking() {
+    document.addEventListener('mousemove', (e) => {
+        const mouseX = e.clientX / window.innerWidth - 0.5;
+        const mouseY = e.clientY / window.innerHeight - 0.5;
+        
+        leftPupil.style.transform = `translate(${mouseX * 12}px, ${mouseY * 12}px)`;
+        rightPupil.style.transform = `translate(${mouseX * 12}px, ${mouseY * 12}px)`;
+    });
+}
+
+// Load Escalation Tickets Modal
+async function loadAndShowTickets() {
+    try {
+        const res = await fetch('/api/tickets');
+        const data = await res.json();
+        
+        if (data.tickets && data.tickets.length > 0) {
+            ticketsList.innerHTML = data.tickets.map(t => `
+                <div class="ticket-item">
+                    <h4>Ticket ID: ${t.ticket_id} (${t.status.toUpperCase()})</h4>
+                    <p><strong>Summary:</strong> ${t.issue_summary}</p>
+                    <p><strong>Steps Attempted:</strong> ${t.steps_tried ? t.steps_tried.join(', ') : 'None'}</p>
+                    <p><small>Created: ${new Date(t.created_at).toLocaleString()}</small></p>
+                </div>
+            `).join('');
+        } else {
+            ticketsList.innerHTML = '<p class="empty-state">No tickets escalated yet.</p>';
+        }
+    } catch (e) {
+        ticketsList.innerHTML = '<p class="empty-state">Unable to load tickets.</p>';
+    }
+    
+    ticketsModal.hidden = false;
+}
