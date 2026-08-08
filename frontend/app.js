@@ -497,8 +497,10 @@ function initSpeechRecognition() {
             const cleanText = transcript.trim();
             const lowerClean = cleanText.toLowerCase();
 
-            // Ignore speech while agent is speaking
-            if (cleanText.length > 2 && !isSpeakingAudio) {
+            // Ignore speech while agent is speaking. Threshold is deliberately low (not
+            // > 2) so short-but-meaningful replies like "ok" and "no" (both exactly
+            // 2 characters) actually get sent instead of being silently dropped.
+            if (cleanText.length > 1 && !isSpeakingAudio) {
                 // Ignore greeting echo or speaker feedback
                 if (GREETING_BLACK_LIST.some(phrase => lowerClean.includes(phrase))) {
                     console.log('Ignored greeting echo feedback:', cleanText);
