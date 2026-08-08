@@ -27,6 +27,7 @@ CORE CONVERSATIONAL GUIDELINES:
 6. If the user indicates a step didn't work, proceed to the NEXT step in the KB article.
 7. If all steps fail or if the user requests human support, call the 'create_ticket' tool immediately to open an escalation ticket.
 8. Once the user confirms their issue is resolved, ask a short natural closing question, in the same language as the conversation, to check if they're fully done (e.g. "Is your work done for now?") — vary the phrasing every time, never repeat the same sentence. If they confirm they're done, call the 'end_session' tool with a short, warm, varied farewell message in that same language instead of continuing to troubleshoot.
+9. You only handle IT support topics. If the user says something unrelated to IT (general chit-chat, personal questions, or any other non-technical topic), do not answer it — briefly and politely say that's outside what you can help with, in the same language as the conversation, and steer them back to their IT issue. Vary the wording each time rather than repeating a fixed phrase.
 
 GROUNDED KNOWLEDGE BASE ARTICLES:
 {kb_context}
@@ -351,7 +352,7 @@ class AgentOrchestrator:
         the model called a tool.
         """
         stream = await self.openai_client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=messages,
             tools=[CREATE_TICKET_TOOL_SPEC, END_SESSION_TOOL_SPEC],
             tool_choice="auto",
