@@ -169,7 +169,91 @@ document.addEventListener('DOMContentLoaded', () => {
     initSpeechRecognition();
     startEyeBlinkLoop();
     startMouseEyeTracking();
+    initNetworkBackground();
 });
+
+// Animated "network" background — slow-drifting nodes connected by lines that
+// fade with distance, rendered on a full-viewport canvas behind everything.
+function initNetworkBackground() {
+    const canvas = document.getElementById('bgCanvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const LINK_DIST = 150;
+    const MAX_PARTICLES = 180;
+    let width, height, particles, rafId;
+
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+    }
+
+    function createParticles() {
+        const count = Math.min(MAX_PARTICLES, Math.floor((width * height) / 13000));
+        particles = [];
+        for (let i = 0; i < count; i++) {
+            particles.push({
+                x: Math.random() * width,
+                y: Math.random() * height,
+                vx: (Math.random() - 0.5) * 0.25,
+                vy: (Math.random() - 0.5) * 0.25
+            });
+        }
+    }
+
+    function step() {
+        ctx.clearRect(0, 0, width, height);
+
+        for (const p of particles) {
+            p.x += p.vx;
+            p.y += p.vy;
+            if (p.x <= 0 || p.x >= width) p.vx *= -1;
+            if (p.y <= 0 || p.y >= height) p.vy *= -1;
+        }
+
+        for (let i = 0; i < particles.length; i++) {
+            for (let j = i + 1; j < particles.length; j++) {
+                const a = particles[i], b = particles[j];
+                const dx = a.x - b.x, dy = a.y - b.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < LINK_DIST) {
+                    const alpha = (1 - dist / LINK_DIST) * 0.45;
+                    ctx.strokeStyle = `rgba(90, 120, 160, ${alpha})`;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(a.x, a.y);
+                    ctx.lineTo(b.x, b.y);
+                    ctx.stroke();
+                }
+            }
+        }
+
+        for (const p of particles) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(80, 110, 150, 0.65)';
+            ctx.fill();
+        }
+
+        rafId = requestAnimationFrame(step);
+    }
+
+    resize();
+    createParticles();
+    step();
+
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+            cancelAnimationFrame(rafId);
+            resize();
+            createParticles();
+            step();
+        }, 200);
+    });
+}
 
 function initEvents() {
     micBtn.addEventListener('click', toggleSession);
