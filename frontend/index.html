@@ -115,22 +115,13 @@
                     <span class="state-label" id="stateLabel">Session IDLE</span>
                 </div>
 
-                <!-- Live Speech Caption Overlay -->
-                <div class="caption-container" id="captionContainer">
-                    <p class="caption-text" id="captionText">Tap the microphone to start your IT helpdesk session...</p>
-                    <p class="caption-subtext">Ready for your query.</p>
+                <!-- Live Speech Caption Card -->
+                <div class="caption-card" id="captionContainer">
+                    <div class="caption-row">
+                        <span class="caption-label caption-label-agent">VoxAssist</span>
+                        <p class="caption-text" id="agentCaptionText">Tap the microphone to start your IT helpdesk session...</p>
+                    </div>
                 </div>
-            </div>
-
-            <!-- Interactive Input Bar (type instead of speak) -->
-            <div class="chat-input-bar">
-                <input type="text" id="userInput" placeholder="Or type your IT issue here..." disabled autocomplete="off">
-                <button id="sendBtn" class="send-button" disabled title="Send Message">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <line x1="22" y1="2" x2="11" y2="13"></line>
-                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                    </svg>
-                </button>
             </div>
 
             <!-- Bottom Controls -->

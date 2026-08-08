@@ -337,79 +337,50 @@ body {
     color: var(--text-muted);
 }
 
-.caption-container {
+/* Conversation Caption Card — shows the last thing the user said and the last
+   thing the agent said as two distinct rows, instead of one line that gets
+   overwritten by whichever side spoke most recently. */
+.caption-card {
     margin-top: 1.25rem;
-    max-width: 420px;
-    max-height: 18vh;
+    width: 100%;
+    max-width: 460px;
+    max-height: 22vh;
     overflow-y: auto;
-    text-align: center;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    background: rgba(244, 247, 251, 0.65);
+    border: 1px solid var(--card-border);
+    border-radius: 18px;
+    padding: 0.9rem 1.1rem;
+}
+
+.caption-row {
+    text-align: left;
+}
+
+.caption-label {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.1rem 0.5rem;
+    border-radius: 99px;
+    margin-bottom: 0.3rem;
+}
+
+.caption-label-agent {
+    color: #7c3aed;
+    background: #f1e9fe;
 }
 
 .caption-text {
-    font-size: 1rem;
+    font-size: 0.92rem;
     font-weight: 500;
     color: var(--text-main);
-    line-height: 1.5;
-}
-
-.caption-subtext {
-    margin-top: 0.35rem;
-    font-size: 0.82rem;
-    color: var(--text-muted);
-}
-
-/* Chat Input Bar */
-.chat-input-bar {
-    display: flex;
-    flex-shrink: 0;
-    gap: 0.5rem;
-    width: 100%;
-    max-width: 420px;
-    background: #f4f7fb;
-    border: 1px solid var(--card-border);
-    padding: 0.4rem 0.5rem 0.4rem 1rem;
-    border-radius: 99px;
-    margin-top: 1.5rem;
-}
-
-.chat-input-bar input {
-    flex: 1;
-    background: transparent;
-    border: none;
-    outline: none;
-    color: var(--text-main);
-    font-family: var(--font-sans);
-    font-size: 0.88rem;
-    padding: 0.35rem 0;
-}
-
-.chat-input-bar input::placeholder {
-    color: #9aa5b1;
-}
-
-.send-button {
-    background: var(--accent-blue-light);
-    border: none;
-    color: var(--accent-blue);
-    width: 34px;
-    height: 34px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    flex-shrink: 0;
-}
-
-.send-button:hover:not(:disabled) {
-    background: var(--accent-blue);
-    color: #fff;
-}
-
-.send-button:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
+    line-height: 1.45;
 }
 
 /* Controls Bar */

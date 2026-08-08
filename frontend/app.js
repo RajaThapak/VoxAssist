@@ -33,15 +33,12 @@ const ticketsModal = document.getElementById('ticketsModal');
 const closeTicketsBtn = document.getElementById('closeTicketsBtn');
 const ticketsList = document.getElementById('ticketsList');
 
-const userInput = document.getElementById('userInput');
-const sendBtn = document.getElementById('sendBtn');
-
 const connStatus = document.getElementById('connStatus');
 const faceGlow = document.getElementById('faceGlow');
 const statePill = document.getElementById('statePill');
 const stateDot = document.getElementById('stateDot');
 const stateLabel = document.getElementById('stateLabel');
-const captionText = document.getElementById('captionText');
+const agentCaptionText = document.getElementById('agentCaptionText');
 
 const leftPupil = document.getElementById('leftPupil');
 const rightPupil = document.getElementById('rightPupil');
@@ -260,28 +257,6 @@ function initEvents() {
     interruptBtn.addEventListener('click', triggerBargeIn);
     ticketsBtn.addEventListener('click', loadAndShowTickets);
     closeTicketsBtn.addEventListener('click', () => ticketsModal.hidden = true);
-    
-    sendBtn.addEventListener('click', handleUserTextInput);
-    userInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') handleUserTextInput();
-    });
-}
-
-function handleUserTextInput() {
-    const text = userInput.value.trim();
-    if (text && ws && ws.readyState === WebSocket.OPEN) {
-        if (isSpeakingAudio) {
-            triggerBargeIn();
-        }
-
-        conversationLang = detectTextLang(text);
-        captionText.textContent = `You: "${text}"`;
-        ws.send(JSON.stringify({
-            type: 'user_speech',
-            text: text
-        }));
-        userInput.value = '';
-    }
 }
 
 // WebSocket Connection
@@ -299,8 +274,6 @@ function connectWebSocket() {
         micBtn.classList.add('active');
         micBtnText.textContent = 'End Session';
         interruptBtn.disabled = false;
-        userInput.disabled = false;
-        sendBtn.disabled = false;
     };
 
     ws.onmessage = (event) => {
@@ -315,8 +288,6 @@ function connectWebSocket() {
         micBtn.classList.remove('active');
         micBtnText.textContent = 'Start Session';
         interruptBtn.disabled = true;
-        userInput.disabled = true;
-        sendBtn.disabled = true;
         updateState('idle');
         stopSpeechListening();
         window.speechSynthesis.cancel();
@@ -342,7 +313,7 @@ function toggleSession() {
 function onAgentSpeechComplete() {
     if (pendingSessionEnd) {
         pendingSessionEnd = false;
-        captionText.textContent = 'Session ended. Tap Start Session to begin again.';
+        agentCaptionText.textContent = 'Session ended. Tap Start Session to begin again.';
         updateState('idle');
         if (ws) ws.close();
         return;
@@ -380,7 +351,7 @@ function playNextInQueue() {
     isPlayingQueue = true;
     const segment = ttsQueue.shift();
     lastBotSpokenText = segment.text.toLowerCase();
-    captionText.textContent = `VoxAssist: "${segment.text}"`;
+    agentCaptionText.textContent = segment.text;
     conversationLang = detectTextLang(segment.text);
     updateState('speaking');
 
@@ -400,7 +371,7 @@ function handleServerEvent(event) {
             lastBotSpokenText = event.greeting.toLowerCase();
             conversationLang = detectTextLang(event.greeting);
             updateState('speaking');
-            captionText.textContent = `VoxAssist: "${event.greeting}"`;
+            agentCaptionText.textContent = event.greeting;
             if (event.audio_base64) {
                 playRimeAudio(event.audio_base64, event.mime, () => {
                     updateState('listening');
@@ -445,9 +416,6 @@ function handleServerEvent(event) {
             if (event.state === 'thinking') {
                 resetTtsQueue();
             }
-            if (event.user_text) {
-                captionText.textContent = `You: "${event.user_text}"`;
-            }
             if (event.state === 'listening' && !isSpeakingAudio) {
                 setTimeout(() => startSpeechListening(), 500);
             }
@@ -475,10 +443,10 @@ function updateState(state) {
     }
 
     if (state === 'interrupted') {
-        captionText.textContent = '⚡ Interrupted! Listening for your response...';
+        agentCaptionText.textContent = '⚡ Interrupted! Listening for your response...';
         triggerBargeInVisuals();
     } else if (state === 'escalating') {
-        captionText.textContent = 'Opening an IT Support Escalation Ticket...';
+        agentCaptionText.textContent = 'Opening an IT Support Escalation Ticket...';
     }
 }
 
@@ -543,7 +511,6 @@ function initSpeechRecognition() {
                 }
 
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    captionText.textContent = `You: "${cleanText}"`;
                     ws.send(JSON.stringify({
                         type: 'user_speech',
                         text: cleanText
