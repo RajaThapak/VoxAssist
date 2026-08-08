@@ -512,26 +512,45 @@ function ensureAudioGraph() {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const source = audioCtx.createMediaElementSource(ttsAudioEl);
     analyserNode = audioCtx.createAnalyser();
-    analyserNode.fftSize = 256;
-    analyserData = new Uint8Array(analyserNode.frequencyBinCount);
+    // Time-domain (waveform) data gives true loudness via RMS — frequency-bin
+    // averaging was diluted by high frequencies that carry little speech energy,
+    // making the mouth respond weakly and out of step with the actual audio.
+    analyserNode.fftSize = 1024;
+    analyserData = new Uint8Array(analyserNode.fftSize);
     source.connect(analyserNode);
     analyserNode.connect(audioCtx.destination);
 }
+
+// Exponential smoothing keeps the mouth from flickering frame-to-frame while
+// staying responsive enough to track syllables in real time.
+let smoothedAmplitude = 0;
 
 function stopRimeAudio() {
     cancelAnimationFrame(lipSyncRAF);
     if (ttsAudioEl && !ttsAudioEl.paused) {
         ttsAudioEl.pause();
     }
+    smoothedAmplitude = 0;
     animateLipSync(0);
 }
 
 function tickLipSync() {
-    analyserNode.getByteFrequencyData(analyserData);
-    let sum = 0;
-    for (let i = 0; i < analyserData.length; i++) sum += analyserData[i];
-    const amplitude = Math.min(1, (sum / analyserData.length) / 90);
-    animateLipSync(amplitude);
+    analyserNode.getByteTimeDomainData(analyserData);
+
+    let sumSquares = 0;
+    for (let i = 0; i < analyserData.length; i++) {
+        const sample = (analyserData[i] - 128) / 128; // -1..1
+        sumSquares += sample * sample;
+    }
+    const rms = Math.sqrt(sumSquares / analyserData.length);
+    // Speech RMS typically sits well under 1.0 even at full volume — scale up
+    // so quiet consonants and loud vowels both produce visible mouth movement.
+    const targetAmplitude = Math.min(1, rms * 3.5);
+
+    smoothedAmplitude += (targetAmplitude - smoothedAmplitude) * 0.6;
+    if (smoothedAmplitude < 0.03) smoothedAmplitude = 0;
+
+    animateLipSync(smoothedAmplitude);
     lipSyncRAF = requestAnimationFrame(tickLipSync);
 }
 
@@ -596,8 +615,16 @@ function speakBrowserUtterance(text, onCompleteCallback) {
         utterance.onboundary = (e) => {
             if (e.name === 'word') {
                 clearTimeout(mouthCloseTimer);
-                animateLipSync(0.55 + Math.random() * 0.45);
-                mouthCloseTimer = setTimeout(() => animateLipSync(0.05), 110);
+                // Browsers don't expose real audio data for their built-in voices, so
+                // this can't be true waveform sync — but scaling both the open size and
+                // hold duration by the actual word's length (from the browser's own
+                // boundary event) tracks real speech rhythm far better than a fixed
+                // duration with a random size.
+                const wordLen = e.charLength || 4;
+                const amplitude = Math.min(1, 0.5 + wordLen * 0.035 + Math.random() * 0.1);
+                const openDuration = Math.min(220, 70 + wordLen * 12);
+                animateLipSync(amplitude);
+                mouthCloseTimer = setTimeout(() => animateLipSync(0.05), openDuration);
             }
         };
 

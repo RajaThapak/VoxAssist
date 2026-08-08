@@ -73,6 +73,42 @@ def _is_hindi(text: str) -> bool:
     return any('ऀ' <= ch <= 'ॿ' for ch in text)
 
 
+AFFIRMATIVE_KEYWORDS = [
+    "yes", "yeah", "yep", "fixed", "resolved", "working", "thank", "thanks", "okay", "ok",
+    "all set", "that's all", "thats all", "nothing else", "all done", "i'm done", "im done",
+    "haan", "han", "theek", "thik", "sahi", "ho gaya", "हाँ", "हां", "ठीक", "धन्यवाद", "शुक्रिया", "हो गया"
+]
+
+NEGATIVE_KEYWORDS = [
+    "no", "nope", "not working", "didn't work", "didnt work", "failed", "next",
+    "nahi", "nahin", "kaam nahi", "नहीं", "नही"
+]
+
+# Heuristic signal that the assistant's last message was a "are you fully done?"
+# closing question rather than a normal troubleshooting-step confirmation (e.g.
+# "does that fix it?") — deliberately distinct wording so the two aren't confused.
+CLOSING_QUESTION_SIGNALS = [
+    "done for", "all done", "all set", "anything else", "is that everything", "is that all",
+    "close this out", "close the session", "wrap up", "finished for", "good to go", "sorted for now",
+    "काम पूरा", "आज के लिए", "कुछ और", "बंद कर", "सब कुछ"
+]
+
+
+def _is_affirmative_text(text: str) -> bool:
+    lower = text.strip().lower()
+    return any(kw in lower for kw in AFFIRMATIVE_KEYWORDS)
+
+
+def _is_negative_text(text: str) -> bool:
+    lower = text.strip().lower()
+    return any(kw in lower for kw in NEGATIVE_KEYWORDS)
+
+
+def _looks_like_closing_question(text: str) -> bool:
+    lower = text.lower()
+    return "?" in text and any(sig in lower for sig in CLOSING_QUESTION_SIGNALS)
+
+
 class AgentOrchestrator:
     def __init__(self, session_id: str, send_ws_event: Callable[[Dict[str, Any]], Any]):
         self.session_id = session_id
@@ -97,13 +133,34 @@ class AgentOrchestrator:
             await session_store.set_state(self.session_id, "thinking")
             await self.send_ws_event({"type": "state_change", "state": "thinking", "user_text": user_text})
 
-            # 1. Retrieve grounded KB content from Qdrant, concurrently with the Redis
-            # session/history fetch — neither depends on the other's result (the user
-            # turn was already persisted above, so this read already sees it).
-            kb_articles, session = await asyncio.gather(
-                qdrant_manager.search_kb(user_text, limit=2),
-                session_store.get_session(self.session_id)
-            )
+            session = await session_store.get_session(self.session_id)
+
+            # Deterministic backstop: if we asked "are you fully done?" last turn, don't
+            # rely on the LLM to reliably call the end_session tool on this turn — it's a
+            # soft judgment call and tool_choice="auto" doesn't always trigger it, which
+            # left sessions stuck re-asking the same closing question instead of actually
+            # closing. This check is independent of the LLM/offline path.
+            if session.get("awaiting_close_confirmation"):
+                await session_store.update_session(self.session_id, {"awaiting_close_confirmation": False})
+                is_hi = _is_hindi(user_text)
+                if _is_affirmative_text(user_text):
+                    await session_store.set_state(self.session_id, "speaking")
+                    await self.send_ws_event({"type": "state_change", "state": "speaking"})
+                    farewell = random.choice(FAREWELL_MESSAGES_HI if is_hi else FAREWELL_MESSAGES_EN)
+                    await self._stream_spoken_response(farewell)
+                    await self.send_ws_event({"type": "session_end"})
+                    return
+                elif _is_negative_text(user_text):
+                    await session_store.set_state(self.session_id, "speaking")
+                    await self.send_ws_event({"type": "state_change", "state": "speaking"})
+                    reply = ("कोई बात नहीं — और किस चीज़ में मदद कर सकता हूँ?" if is_hi
+                             else "No problem — what else can I help you with?")
+                    await self._stream_spoken_response(reply)
+                    return
+                # Otherwise: not a clear yes/no — fall through and treat this as a fresh request.
+
+            # 1. Retrieve grounded KB content from Qdrant
+            kb_articles = await qdrant_manager.search_kb(user_text, limit=2)
             kb_context_str = ""
             for art in kb_articles:
                 kb_context_str += f"- Title: {art['title']}\n  Steps: {'; '.join(art['steps'])}\n"
@@ -148,6 +205,12 @@ class AgentOrchestrator:
                             await self.send_ws_event({"type": "session_end"})
                             return
 
+                    # If this reply looks like a "are you fully done?" closing question,
+                    # arm the deterministic backstop above for the next turn instead of
+                    # trusting the model to remember to call end_session on its own.
+                    if full_text and _looks_like_closing_question(full_text):
+                        await session_store.update_session(self.session_id, {"awaiting_close_confirmation": True})
+
                     await self._stream_spoken_response(full_text or "Let me check our IT knowledge base to assist you.")
                     return
 
@@ -174,15 +237,8 @@ class AgentOrchestrator:
         closing_questions = CLOSING_QUESTIONS_HI if is_hi else CLOSING_QUESTIONS_EN
         farewell_messages = FAREWELL_MESSAGES_HI if is_hi else FAREWELL_MESSAGES_EN
 
-        is_affirmative = any(kw in user_lower for kw in [
-            "yes", "yeah", "yep", "fixed", "resolved", "working", "thank", "thanks",
-            "all set", "that's all", "thats all", "nothing else", "all done", "i'm done", "im done",
-            "haan", "han", "theek", "thik", "sahi", "ho gaya", "हाँ", "हां", "ठीक", "धन्यवाद", "शुक्रिया", "हो गया"
-        ])
-        is_negative = any(kw in user_lower for kw in [
-            "no", "nope", "not working", "didn't work", "didnt work", "failed", "next",
-            "nahi", "nahin", "kaam nahi", "नहीं", "नही"
-        ])
+        is_affirmative = _is_affirmative_text(user_text)
+        is_negative = _is_negative_text(user_text)
 
         # 0. Follow-up to a previously asked "is your work done?" closing question
         if awaiting_close:
