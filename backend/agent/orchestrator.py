@@ -32,6 +32,7 @@ CORE CONVERSATIONAL GUIDELINES:
 9. Only decline topics that are genuinely unrelated to IT/technical support — general chit-chat, personal questions, entertainment, or similar. A technical or IT-related question is never out of scope just because it isn't covered by the Knowledge Base articles below (e.g. Docker, Kubernetes, cloud services, programming questions, or any other IT topic this demo's KB doesn't happen to include) — help with those directly using your own general IT knowledge instead of declining or redirecting. Only use the polite "outside what I can help with" redirect for genuinely non-technical topics, varying the wording each time.
 10. When guiding the user step-by-step through a solution or troubleshooting action, vary your phrasing naturally from turn to turn (e.g., "Give that a shot!", "Let me know when you've tried that!", "Try that now!"). Never repeat repetitive phrases like "I'll rest while you..." over and over across multiple turns.
 11. When the user indicates they applied or finished a step (e.g. "I applied that", "Done", "I tried that"), react enthusiastically and cheerfully at the beginning of your response (e.g. "Oooo nice! Now the next step is..." or "Awesome! Step 2 is...") before giving the next instruction.
+12. If an escalation ticket (e.g. ticket TICK-XXXX) has ALREADY been created in this session, DO NOT call the 'create_ticket' tool again under any circumstances. Simply inform the user that ticket TICK-XXXX is already active and ask if they are ready to close the session or need help with a different issue.
 
 GROUNDED KNOWLEDGE BASE ARTICLES:
 {kb_context}
@@ -160,6 +161,35 @@ class AgentOrchestrator:
             await self.send_ws_event({"type": "state_change", "state": "thinking", "user_text": user_text})
 
             session = await session_store.get_session(self.session_id)
+
+            # Post-escalation backstop: if a ticket was already opened in this session, don't repeat creation
+            if session.get("has_escalated"):
+                existing_ticket_id = session.get("created_ticket_id", "TICK-ACTIVE")
+                is_hi = _is_hindi(user_text)
+                if _is_affirmative_text(user_text) or any(kw in user_text.lower() for kw in ["bye", "thanks", "thank you", "done", "close", "ok", "okay"]):
+                    await session_store.set_state(self.session_id, "speaking")
+                    await self.send_ws_event({"type": "state_change", "state": "speaking"})
+                    farewell = random.choice(FAREWELL_MESSAGES_HI if is_hi else FAREWELL_MESSAGES_EN)
+                    await self._stream_spoken_response(farewell)
+                    await self.send_ws_event({"type": "session_end"})
+                    logger.info(f"[latency] TOTAL turn (post-escalation close): {(time.monotonic() - turn_started) * 1000:.0f}ms")
+                    return
+                elif any(kw in user_text.lower() for kw in ["new", "other", "another", "nayi", "dusri"]):
+                    # Reset escalation state so user can ask a new question
+                    await session_store.update_session(self.session_id, {
+                        "has_escalated": False,
+                        "created_ticket_id": None,
+                        "kb_topic_articles": None
+                    })
+                else:
+                    await session_store.set_state(self.session_id, "speaking")
+                    await self.send_ws_event({"type": "state_change", "state": "speaking"})
+                    reply = (f"आपका एस्केलेशन टिकट {existing_ticket_id} एक्टिव है। आईटी टीम आपसे संपर्क करेगी। क्या मैं यह सेशन बंद कर दूँ?" if is_hi
+                             else f"Your escalation ticket {existing_ticket_id} is active. IT support will contact you shortly. Would you like me to close this session now?")
+                    await session_store.update_session(self.session_id, {"awaiting_close_confirmation": True})
+                    await self._stream_spoken_response(reply)
+                    logger.info(f"[latency] TOTAL turn (post-escalation prompt): {(time.monotonic() - turn_started) * 1000:.0f}ms")
+                    return
 
             # Deterministic backstop: if we asked "are you fully done?" last turn, don't
             # rely on the LLM to reliably call the end_session tool on this turn — it's a
@@ -482,13 +512,14 @@ class AgentOrchestrator:
 
                 if delta.tool_calls:
                     for tc_delta in delta.tool_calls:
-                        entry = tool_call_chunks.setdefault(tc_delta.index, {"name": "", "arguments": ""})
+                        tc_idx = tc_delta.index if tc_delta.index is not None else 0
+                        entry = tool_call_chunks.setdefault(tc_idx, {"name": "", "arguments": ""})
                         if tc_delta.function and tc_delta.function.name:
                             entry["name"] += tc_delta.function.name
                         if tc_delta.function and tc_delta.function.arguments:
                             entry["arguments"] += tc_delta.function.arguments
 
-                if delta.content:
+                if delta.content and not tool_call_chunks:
                     full_text += delta.content
                     unspoken += delta.content
 
@@ -506,8 +537,14 @@ class AgentOrchestrator:
                         boundary = _find_sentence_boundary(unspoken)
 
             if tool_call_chunks:
-                # No sentences should have been queued in this branch (see
-                # docstring), but shut the delivery pipeline down cleanly either way.
+                # Cancel any sentence TTS tasks that were started before tool call arrived
+                while not segment_queue.empty():
+                    try:
+                        item = segment_queue.get_nowait()
+                        if item is not None and len(item) > 2:
+                            item[2].cancel()
+                    except Exception:
+                        pass
                 await segment_queue.put(None)
                 await deliver_task
                 first = next(iter(tool_call_chunks.values()))

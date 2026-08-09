@@ -26,3 +26,15 @@ async def test_ticket_creation_idempotency():
     # Must return exact same ticket ID (no duplicate created)
     assert ticket1_id == ticket2_id
     assert res2["message"] == f"Escalation ticket {ticket1_id} is already open."
+
+@pytest.mark.asyncio
+async def test_post_escalation_turn_handling():
+    session_id = "test_post_escalation_session"
+    await session_store.update_session(session_id, {
+        "has_escalated": True,
+        "created_ticket_id": "TICK-8899"
+    })
+    
+    session = await session_store.get_session(session_id)
+    assert session.get("has_escalated") is True
+    assert session.get("created_ticket_id") == "TICK-8899"
