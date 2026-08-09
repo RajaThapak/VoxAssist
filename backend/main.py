@@ -14,7 +14,7 @@ from backend.storage.redis_session import session_store
 from backend.storage.mongo_db import mongo_store
 from backend.rag.qdrant_kb import qdrant_manager
 from backend.tts.rime_tts import rime_tts
-from backend.agent.orchestrator import AgentOrchestrator
+from backend.agent.orchestrator import AgentOrchestrator, _openai_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("voxassist.main")
@@ -35,6 +35,9 @@ async def lifespan(app: FastAPI):
     mongo_store.connect()
     await qdrant_manager.init_db()
     yield
+    await rime_tts.close()
+    if _openai_client is not None:
+        await _openai_client.close()
     logger.info("VoxAssist backend shut down.")
 
 app = FastAPI(title="VoxAssist API", version="1.0.0", lifespan=lifespan)

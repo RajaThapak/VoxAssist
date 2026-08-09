@@ -1,4 +1,6 @@
+import re
 import json
+import time
 import random
 import base64
 import asyncio
@@ -110,15 +112,38 @@ def _looks_like_closing_question(text: str) -> bool:
     return "?" in text and any(sig in lower for sig in CLOSING_QUESTION_SIGNALS)
 
 
+_SENTENCE_END_CHARS = ".!?।"  # includes the Hindi danda for Hindi-language replies
+
+
+def _find_sentence_boundary(text: str) -> Optional[int]:
+    """
+    Index just past the first sentence-ending punctuation mark in `text`
+    that is followed by whitespace, or None if no complete sentence is in
+    the buffer yet. Requires a trailing space (rather than treating
+    end-of-buffer as a boundary) so a streamed token that happens to end on
+    "3." isn't mistaken for a sentence end when "5" is still about to
+    arrive for "3.5".
+    """
+    for i, ch in enumerate(text):
+        if ch in _SENTENCE_END_CHARS and i + 1 < len(text) and text[i + 1].isspace():
+            return i + 1
+    return None
+
+
+# Module-level singleton, created once for the process lifetime and shared
+# across every session — mirrors the Rime client fix. Previously a fresh
+# AsyncOpenAI() (and its own connection pool) was created per WebSocket
+# session, so every session's first LLM call paid a cold TCP+TLS handshake
+# to api.openai.com instead of reusing an already-warm connection.
+_openai_client: Optional[AsyncOpenAI] = AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if settings.is_openai_live else None
+
+
 class AgentOrchestrator:
     def __init__(self, session_id: str, send_ws_event: Callable[[Dict[str, Any]], Any]):
         self.session_id = session_id
         self.send_ws_event = send_ws_event
         self.interrupt_controller = InterruptController(session_id)
-        self.openai_client: Optional[AsyncOpenAI] = None
-        
-        if settings.is_openai_live:
-            self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        self.openai_client: Optional[AsyncOpenAI] = _openai_client
 
     async def process_user_turn(self, user_text: str):
         """
@@ -128,6 +153,7 @@ class AgentOrchestrator:
         3. LLM streaming generation + tool call check
         4. Rime TTS speech streaming to client
         """
+        turn_started = time.monotonic()
         try:
             # Save user turn to Redis memory
             await session_store.add_turn(self.session_id, "user", user_text)
@@ -150,18 +176,44 @@ class AgentOrchestrator:
                     farewell = random.choice(FAREWELL_MESSAGES_HI if is_hi else FAREWELL_MESSAGES_EN)
                     await self._stream_spoken_response(farewell)
                     await self.send_ws_event({"type": "session_end"})
+                    logger.info(f"[latency] TOTAL turn: {(time.monotonic() - turn_started) * 1000:.0f}ms")
                     return
                 elif _is_negative_text(user_text):
+                    # User wants something else — the next message is a fresh
+                    # topic, not a continuation, so the KB cache must not be
+                    # reused for it.
+                    await session_store.update_session(self.session_id, {"kb_topic_articles": None})
                     await session_store.set_state(self.session_id, "speaking")
                     await self.send_ws_event({"type": "state_change", "state": "speaking"})
                     reply = ("कोई बात नहीं — और किस चीज़ में मदद कर सकता हूँ?" if is_hi
                              else "No problem — what else can I help you with?")
                     await self._stream_spoken_response(reply)
+                    logger.info(f"[latency] TOTAL turn: {(time.monotonic() - turn_started) * 1000:.0f}ms")
                     return
                 # Otherwise: not a clear yes/no — fall through and treat this as a fresh request.
 
-            # 1. Retrieve grounded KB content from Qdrant
-            kb_articles = await qdrant_manager.search_kb(user_text, limit=2)
+            # 1. Retrieve grounded KB content from Qdrant — session-aware: a
+            # short, recognizable continuation ("yes", "that worked", "no",
+            # "didn't work") on a topic already established this session
+            # reuses the cached KB articles instead of paying for a fresh
+            # embedding + Qdrant round trip. Anything else (including a
+            # message that introduces new content, e.g. a new error code)
+            # falls through to a full fresh retrieval — an embedding-
+            # similarity approach was tested first and rejected: it measured
+            # LOWER similarity for genuine same-topic follow-ups ("that
+            # worked" vs. its own topic opener, 0.17) than for actual topic
+            # changes (VPN -> Spotify, 0.45), so it could not reliably tell
+            # continuation from a new issue. The affirmative/negative
+            # keyword check below is narrower but doesn't misfire.
+            t_kb_start = time.monotonic()
+            cached_kb_articles = session.get("kb_topic_articles")
+            if cached_kb_articles and (_is_affirmative_text(user_text) or _is_negative_text(user_text)):
+                kb_articles = cached_kb_articles
+                logger.info(f"[latency] KB retrieval: reused cached topic, skipped embed+Qdrant ({(time.monotonic() - t_kb_start) * 1000:.0f}ms)")
+            else:
+                kb_articles = await qdrant_manager.search_kb(user_text, limit=2)
+                await session_store.update_session(self.session_id, {"kb_topic_articles": kb_articles})
+                logger.info(f"[latency] KB retrieval total (fresh): {(time.monotonic() - t_kb_start) * 1000:.0f}ms")
             kb_context_str = ""
             for art in kb_articles:
                 kb_context_str += f"- Title: {art['title']}\n  Steps: {'; '.join(art['steps'])}\n"
@@ -176,20 +228,27 @@ class AgentOrchestrator:
             await session_store.set_state(self.session_id, "speaking")
             await self.send_ws_event({"type": "state_change", "state": "speaking"})
 
-            # 3. LLM Execution — streamed on the OpenAI side (text arrives as it's
-            # generated rather than blocking on the whole response), but synthesized
-            # as a single Rime call once the full text is known (see _stream_llm_response
-            # for why per-sentence synthesis was reverted).
+            # 3. LLM Execution — streamed on the OpenAI side, with Rime synthesis
+            # for each sentence kicked off as soon as that sentence is complete
+            # rather than waiting for the full reply (see _stream_llm_response).
+            # Spoken segments for a plain-text reply are sent to the client from
+            # inside that call, in order, as they're synthesized.
             if self.openai_client and settings.is_openai_live:
                 try:
+                    t_llm_start = time.monotonic()
                     full_text, tool_call = await asyncio.wait_for(
-                        self._stream_llm_response(messages),
+                        self._stream_llm_response(messages, turn_started),
                         timeout=20.0
                     )
+                    logger.info(f"[latency] LLM generation: {(time.monotonic() - t_llm_start) * 1000:.0f}ms")
 
                     if tool_call:
                         name, args = tool_call
                         if name == "create_ticket":
+                            # Escalated — this topic is resolved (handed off to a
+                            # human), so its KB cache must not leak into whatever
+                            # the user brings up next.
+                            await session_store.update_session(self.session_id, {"kb_topic_articles": None})
                             await session_store.set_state(self.session_id, "escalating")
                             await self.send_ws_event({"type": "state_change", "state": "escalating"})
 
@@ -198,21 +257,28 @@ class AgentOrchestrator:
 
                             spoken_reply = f"I have escalated your issue to IT support. Ticket {ticket_id} has been opened and a technician will contact you shortly."
                             await self._stream_spoken_response(spoken_reply)
+                            logger.info(f"[latency] TOTAL turn: {(time.monotonic() - turn_started) * 1000:.0f}ms")
                             return
 
                         elif name == "end_session":
                             farewell = args.get("farewell_message") or random.choice(FAREWELL_MESSAGES)
                             await self._stream_spoken_response(farewell)
                             await self.send_ws_event({"type": "session_end"})
+                            logger.info(f"[latency] TOTAL turn: {(time.monotonic() - turn_started) * 1000:.0f}ms")
                             return
+
+                    # Plain-text reply: segments were already synthesized and sent to
+                    # the client sentence-by-sentence inside _stream_llm_response as
+                    # they became ready — just persist history and wrap up here.
+                    await session_store.add_turn(self.session_id, "assistant", full_text)
 
                     # If this reply looks like a "are you fully done?" closing question,
                     # arm the deterministic backstop above for the next turn instead of
                     # trusting the model to remember to call end_session on its own.
-                    if full_text and _looks_like_closing_question(full_text):
+                    if _looks_like_closing_question(full_text):
                         await session_store.update_session(self.session_id, {"awaiting_close_confirmation": True})
 
-                    await self._stream_spoken_response(full_text or "Let me check our IT knowledge base to assist you.")
+                    logger.info(f"[latency] TOTAL turn: {(time.monotonic() - turn_started) * 1000:.0f}ms")
                     return
 
                 except Exception as e:
@@ -223,6 +289,7 @@ class AgentOrchestrator:
             await self._stream_spoken_response(spoken_reply)
             if should_close:
                 await self.send_ws_event({"type": "session_end"})
+            logger.info(f"[latency] TOTAL turn (offline fallback): {(time.monotonic() - turn_started) * 1000:.0f}ms")
         except Exception as outer_e:
             logger.error(f"Error in process_user_turn: {outer_e}", exc_info=True)
             await session_store.set_state(self.session_id, "listening")
@@ -339,18 +406,29 @@ class AgentOrchestrator:
 
         return "I can help walk you through troubleshooting. Could you tell me more about what device or application is giving you trouble?", False
 
-    async def _stream_llm_response(self, messages: List[Dict[str, str]]):
+    async def _stream_llm_response(self, messages: List[Dict[str, str]], turn_started: float):
         """
-        Streams the chat completion (stream=True — returns text as it's generated
-        rather than blocking until the entire response is done). The accumulated
-        text is synthesized as a single Rime call once the stream finishes, not
-        per-sentence: Rime has a large fixed per-call latency floor (~1.5-2.2s,
-        nearly independent of text length — measured directly), so splitting one
-        reply into several Rime calls multiplies that overhead instead of hiding
-        it, making total latency worse rather than better.
+        Streams the chat completion and pipelines TTS synthesis with generation:
+        as soon as a complete sentence appears in the streamed text, its Rime
+        synthesis is kicked off immediately as a background task rather than
+        waiting for the rest of the reply to finish generating first. A second
+        coroutine delivers finished segments to the client strictly in order
+        (segment N+1's synthesis can finish before segment N's, since both run
+        concurrently, but it's only ever sent after N has been delivered).
+
+        This targets time-to-first-audio specifically, not total synthesis
+        time — Rime's per-call cost is largely fixed regardless of text length,
+        so a short first sentence doesn't synthesize much faster on its own;
+        the win is that its synthesis now starts as soon as that sentence is
+        known instead of after the entire (often 2-3 sentence) reply is done.
+        Tool-call turns never stream spoken content — the API doesn't mix a
+        tool call with reply text in the same completion — so no segments are
+        produced in that case.
+
         Returns (full_text, tool_call_or_none) where tool_call is (name, args) if
         the model called a tool.
         """
+        llm_request_sent = time.monotonic()
         stream = await self.openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
@@ -361,36 +439,108 @@ class AgentOrchestrator:
         )
 
         full_text = ""
+        unspoken = ""
         tool_call_chunks: Dict[int, Dict[str, str]] = {}
+        segment_index = 0
+        segment_queue: asyncio.Queue = asyncio.Queue()
+        first_segment_logged = False
+        first_chunk_logged = False
+        first_sentence_logged = False
 
-        async for chunk in stream:
-            delta = chunk.choices[0].delta
+        async def deliver_segments():
+            nonlocal first_segment_logged
+            while True:
+                item = await segment_queue.get()
+                if item is None:
+                    return
+                idx, text, synth_task = item
+                audio_bytes = await synth_task
+                if not first_segment_logged:
+                    first_segment_logged = True
+                    logger.info(f"[latency] Time to first spoken segment: {(time.monotonic() - turn_started) * 1000:.0f}ms")
+                delivered = await self._deliver_segment(text, idx, audio_bytes)
+                if not delivered:
+                    # Interrupted — drain and cancel whatever's still queued.
+                    while not segment_queue.empty():
+                        nxt = segment_queue.get_nowait()
+                        if nxt is not None:
+                            nxt[2].cancel()
+                    return
 
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    entry = tool_call_chunks.setdefault(tc_delta.index, {"name": "", "arguments": ""})
-                    if tc_delta.function and tc_delta.function.name:
-                        entry["name"] += tc_delta.function.name
-                    if tc_delta.function and tc_delta.function.arguments:
-                        entry["arguments"] += tc_delta.function.arguments
+        deliver_task = asyncio.create_task(deliver_segments())
 
-            if delta.content:
-                full_text += delta.content
+        try:
+            async for chunk in stream:
+                if not first_chunk_logged:
+                    first_chunk_logged = True
+                    logger.info(f"[latency] GPT request->first chunk (raw TTFT): {(time.monotonic() - llm_request_sent) * 1000:.0f}ms")
 
-        if tool_call_chunks:
-            first = next(iter(tool_call_chunks.values()))
-            try:
-                args = json.loads(first["arguments"]) if first["arguments"] else {}
-            except json.JSONDecodeError:
-                args = {}
-            return full_text, (first["name"], args)
+                delta = chunk.choices[0].delta
 
-        return full_text, None
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        entry = tool_call_chunks.setdefault(tc_delta.index, {"name": "", "arguments": ""})
+                        if tc_delta.function and tc_delta.function.name:
+                            entry["name"] += tc_delta.function.name
+                        if tc_delta.function and tc_delta.function.arguments:
+                            entry["arguments"] += tc_delta.function.arguments
+
+                if delta.content:
+                    full_text += delta.content
+                    unspoken += delta.content
+
+                    boundary = _find_sentence_boundary(unspoken)
+                    while boundary is not None:
+                        sentence, unspoken = unspoken[:boundary].strip(), unspoken[boundary:]
+                        if sentence:
+                            if not first_sentence_logged:
+                                first_sentence_logged = True
+                                logger.info(f"[latency] GPT request->first complete sentence (pre-Rime): {(time.monotonic() - llm_request_sent) * 1000:.0f}ms")
+                            idx = segment_index
+                            segment_index += 1
+                            synth_task = asyncio.create_task(rime_tts.synthesize_speech(sentence))
+                            await segment_queue.put((idx, sentence, synth_task))
+                        boundary = _find_sentence_boundary(unspoken)
+
+            if tool_call_chunks:
+                # No sentences should have been queued in this branch (see
+                # docstring), but shut the delivery pipeline down cleanly either way.
+                await segment_queue.put(None)
+                await deliver_task
+                first = next(iter(tool_call_chunks.values()))
+                try:
+                    args = json.loads(first["arguments"]) if first["arguments"] else {}
+                except json.JSONDecodeError:
+                    args = {}
+                return full_text, (first["name"], args)
+
+            tail = unspoken.strip()
+            if not tail and segment_index == 0:
+                # Nothing was ever spoken (empty completion, no tool call) — speak a
+                # fallback line rather than going silent for the turn.
+                tail = "Let me check our IT knowledge base to assist you."
+                full_text = full_text or tail
+            if tail:
+                idx = segment_index
+                segment_index += 1
+                synth_task = asyncio.create_task(rime_tts.synthesize_speech(tail))
+                await segment_queue.put((idx, tail, synth_task))
+
+            await segment_queue.put(None)
+            await deliver_task
+            await self._end_speech_stream()
+            return full_text, None
+        except (Exception, asyncio.CancelledError):
+            deliver_task.cancel()
+            raise
 
     async def _send_segment(self, text: str, index: int) -> bool:
         """
-        Synthesizes and sends one spoken segment (a sentence, or a whole short
-        reply). Returns False if playback was cancelled by an interruption.
+        Synthesizes and sends one spoken segment (a whole short reply — used
+        for tool-call replies, the closing backstop, and the offline fallback,
+        none of which benefit much from sentence-level pipelining since
+        they're already one short sentence). Returns False if playback was
+        cancelled by an interruption.
         """
         current_session = await session_store.get_session(self.session_id)
         if current_session.get("state") == "interrupted":
@@ -401,10 +551,18 @@ class AgentOrchestrator:
         # supports, so a failed/unavailable synthesis falls back to the browser's
         # own speech synthesis on the frontend (a text-only segment, no audio attached).
         audio_bytes = await rime_tts.synthesize_speech(text)
+        return await self._deliver_segment(text, index, audio_bytes)
 
+    async def _deliver_segment(self, text: str, index: int, audio_bytes: Optional[bytes]) -> bool:
+        """
+        Sends an already-synthesized segment to the client (or its text-only
+        fallback if synthesis failed/was unavailable). Returns False if the
+        session was interrupted before delivery, so the caller can stop
+        sending any further queued segments.
+        """
         current_session = await session_store.get_session(self.session_id)
         if current_session.get("state") == "interrupted":
-            logger.info("Segment playback cancelled due to interruption after synthesis.")
+            logger.info("Segment delivery cancelled due to interruption.")
             return False
 
         if audio_bytes:

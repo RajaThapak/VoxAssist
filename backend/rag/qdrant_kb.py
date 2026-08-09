@@ -1,5 +1,7 @@
 import re
+import time
 import uuid
+import asyncio
 import logging
 from typing import Dict, Any, List, Optional
 from backend.config import settings
@@ -111,32 +113,69 @@ class QdrantKBManager:
             logger.error(f"Error seeding Qdrant vectors: {e}")
             self.use_qdrant = False
 
+    async def embed_query(self, query: str) -> Optional[List[float]]:
+        """
+        Embeds a single query string for callers that want to reuse the
+        embedding themselves (e.g. comparing it against a cached topic
+        embedding before deciding whether a fresh Qdrant search is needed).
+        Returns None if embeddings are unavailable.
+        """
+        if not self.use_qdrant or not self.embed_client or not query.strip():
+            return None
+        embeddings = await self._embed_texts([query])
+        return embeddings[0] if embeddings else None
+
+    async def search_kb_by_embedding(self, query: str, embedding: List[float], limit: int = 2) -> List[Dict[str, Any]]:
+        """
+        Vector search using an already-computed query embedding — skips
+        re-embedding for callers that already have one. Falls back to
+        keyword/topic matching on failure, same as search_kb.
+        """
+        if self.use_qdrant and self.client and embedding:
+            try:
+                # self.client is the sync QdrantClient — query_points() is a
+                # blocking network call, so it's offloaded to a worker thread
+                # instead of running directly on the asyncio event loop (which
+                # would otherwise stall every other concurrent task, including
+                # barge-in handling, for the duration of the network round trip).
+                response = await asyncio.to_thread(
+                    self.client.query_points,
+                    collection_name=self.collection_name,
+                    query=embedding,
+                    limit=limit
+                )
+                results = []
+                for hit in response.points:
+                    kb_id = hit.payload.get("kb_id") if hit.payload else None
+                    article = mongo_store.get_kb_article(kb_id) if kb_id else None
+                    if article:
+                        item = dict(article)
+                        item.pop("_id", None)
+                        results.append(item)
+                if results:
+                    return results
+            except Exception as e:
+                logger.error(f"Qdrant search error, falling back to keyword search: {e}")
+
+        return self._keyword_search_kb(query, limit)
+
     async def search_kb(self, query: str, limit: int = 2) -> List[Dict[str, Any]]:
         """
         Retrieves relevant KB documents via real Qdrant vector search when
         available, falling back to keyword/topic matching otherwise.
         """
         if self.use_qdrant and self.client and query.strip():
-            try:
-                embeddings = await self._embed_texts([query])
-                if embeddings:
-                    response = self.client.query_points(
-                        collection_name=self.collection_name,
-                        query=embeddings[0],
-                        limit=limit
-                    )
-                    results = []
-                    for hit in response.points:
-                        kb_id = hit.payload.get("kb_id") if hit.payload else None
-                        article = mongo_store.get_kb_article(kb_id) if kb_id else None
-                        if article:
-                            item = dict(article)
-                            item.pop("_id", None)
-                            results.append(item)
-                    if results:
-                        return results
-            except Exception as e:
-                logger.error(f"Qdrant search error, falling back to keyword search: {e}")
+            t0 = time.monotonic()
+            embedding = await self.embed_query(query)
+            t1 = time.monotonic()
+            if embedding:
+                result = await self.search_kb_by_embedding(query, embedding, limit)
+                t2 = time.monotonic()
+                logger.info(
+                    f"[latency] KB search: embed={((t1 - t0) * 1000):.0f}ms "
+                    f"qdrant={((t2 - t1) * 1000):.0f}ms"
+                )
+                return result
 
         return self._keyword_search_kb(query, limit)
 

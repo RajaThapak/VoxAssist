@@ -24,6 +24,19 @@ let ttsQueue = [];
 let ttsStreamEnded = false;
 let isPlayingQueue = false;
 
+// Custom VAD: how long to wait after the last detected speech (interim or
+// final) before treating the utterance as complete, instead of relying on
+// the browser's own (unmeasured, suspected slow) end-of-speech detection.
+const CUSTOM_VAD_SILENCE_MS = 600;
+
+// --- Latency test instrumentation (Test 1 & Test 3 frontend legs) ---
+// Logged to console as "[latency-test]" lines; not sent anywhere, purely
+// for manual measurement during a live voice session.
+let _latSpeechEndAt = null;
+function _latLog(label, ms) {
+    console.log(`[latency-test] ${label}: ${ms.toFixed(0)}ms`);
+}
+
 // DOM Elements
 const micBtn = document.getElementById('micBtn');
 const micBtnText = document.getElementById('micBtnText');
@@ -391,6 +404,7 @@ function handleServerEvent(event) {
         // agent can start speaking the first sentence while later ones are still
         // being generated/synthesized.
         case 'tts_audio_segment':
+            console.log('[latency-test] WS audio segment received at', performance.now().toFixed(0));
             enqueueTtsSegment(event.text_segment, event.audio_base64, event.mime);
             break;
 
@@ -478,50 +492,95 @@ function animateLipSync(amplitude) {
     setMouthPill(width, height);
 }
 
-// Web Speech API Integration
+// Web Speech API Integration, with a custom VAD layered on top: the browser's
+// own end-of-speech detection (onspeechend -> final result) is a black box
+// with no configurable timeout and is suspected to be a major contributor to
+// total turn latency. Rather than waiting for it, interim results are used to
+// detect a CUSTOM_VAD_SILENCE_MS pause in speech ourselves and send as soon
+// as that fires — falling back to the browser's own final result if it
+// happens to arrive first.
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SpeechRecognition) {
         speechRecognition = new SpeechRecognition();
         speechRecognition.continuous = true;
-        speechRecognition.interimResults = false;
+        speechRecognition.interimResults = true;
 
-        speechRecognition.onresult = (event) => {
-            let transcript = '';
-            for (let i = event.resultIndex; i < event.results.length; i++) {
-                if (event.results[i].isFinal) {
-                    transcript += event.results[i][0].transcript;
-                }
+        let silenceTimer = null;
+        let latestTranscript = '';
+
+        function clearSilenceTimer() {
+            if (silenceTimer) {
+                clearTimeout(silenceTimer);
+                silenceTimer = null;
             }
+        }
 
-            const cleanText = transcript.trim();
+        function sendAndReset(source, resultAt) {
+            clearSilenceTimer();
+            const cleanText = latestTranscript.trim();
+            latestTranscript = '';
             const lowerClean = cleanText.toLowerCase();
 
             // Ignore speech while agent is speaking. Threshold is deliberately low (not
             // > 2) so short-but-meaningful replies like "ok" and "no" (both exactly
             // 2 characters) actually get sent instead of being silently dropped.
             if (cleanText.length > 1 && !isSpeakingAudio) {
-                // Ignore greeting echo or speaker feedback
                 if (GREETING_BLACK_LIST.some(phrase => lowerClean.includes(phrase))) {
                     console.log('Ignored greeting echo feedback:', cleanText);
-                    return;
-                }
-
-                if (lastBotSpokenText && lowerClean.includes(lastBotSpokenText.slice(-15))) {
+                } else if (lastBotSpokenText && lowerClean.includes(lastBotSpokenText.slice(-15))) {
                     console.log('Ignored speaker echo feedback:', cleanText);
-                    return;
+                } else if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'user_speech', text: cleanText }));
+                    const sendAt = performance.now(); // Test 1 point C: WS message sent
+                    if (_latSpeechEndAt != null) {
+                        _latLog(`B - A (speechend -> ${source})`, resultAt - _latSpeechEndAt);
+                        _latLog(`C - A (speechend -> ws.send, via ${source})`, sendAt - _latSpeechEndAt);
+                    } else {
+                        console.log(`[latency-test] sent via ${source} (no onspeechend observed first)`);
+                    }
                 }
+            }
 
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        type: 'user_speech',
-                        text: cleanText
-                    }));
-                }
+            // Cut off the recognizer's own pending finalization for this
+            // utterance so it can't fire a duplicate/late onresult later —
+            // abort() (unlike stop()) does not produce a trailing final result.
+            try { speechRecognition.abort(); } catch (e) {}
+        }
+
+        // Test 1 instrumentation, point A: the browser's own internal signal
+        // that it believes the user has stopped talking — kept so the custom
+        // VAD above can be compared against it directly during live testing.
+        speechRecognition.onspeechend = () => {
+            _latSpeechEndAt = performance.now();
+            console.log('[latency-test] A (onspeechend) at', _latSpeechEndAt.toFixed(0));
+        };
+
+        speechRecognition.onresult = (event) => {
+            const resultAt = performance.now();
+            let combined = '';
+            let sawFinal = false;
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                combined += event.results[i][0].transcript;
+                if (event.results[i].isFinal) sawFinal = true;
+            }
+            if (!combined) return;
+            latestTranscript = combined;
+
+            clearSilenceTimer();
+            if (sawFinal) {
+                // Browser finished before our custom timer did — use its result immediately.
+                sendAndReset('browser-final', resultAt);
+            } else {
+                // Custom VAD: if no further speech arrives within the window,
+                // treat the utterance as complete instead of waiting on the
+                // browser's own (potentially much slower) endpointing.
+                silenceTimer = setTimeout(() => sendAndReset('silence-timeout', performance.now()), CUSTOM_VAD_SILENCE_MS);
             }
         };
 
         speechRecognition.onend = () => {
+            clearSilenceTimer();
             isListeningSpeech = false;
             if (isSessionActive && !isSpeakingAudio) {
                 setTimeout(() => startSpeechListening(), 500);
@@ -529,6 +588,7 @@ function initSpeechRecognition() {
         };
 
         speechRecognition.onerror = (e) => {
+            clearSilenceTimer();
             console.warn('Speech Recognition Warning:', e.error);
             isListeningSpeech = false;
             if (isSessionActive && e.error !== 'aborted' && !isSpeakingAudio) {
@@ -637,7 +697,11 @@ function playRimeAudio(base64Audio, mimeType, onCompleteCallback) {
     };
 
     ttsAudioEl.src = url;
+    const _latPlayCalledAt = performance.now();
+    console.log('[latency-test] audio element ready, play() called at', _latPlayCalledAt.toFixed(0));
     ttsAudioEl.play().then(() => {
+        const playingAt = performance.now();
+        _latLog('play() called -> playback actually started', playingAt - _latPlayCalledAt);
         tickLipSync();
     }).catch((e) => {
         console.warn('Rime audio playback failed:', e);
