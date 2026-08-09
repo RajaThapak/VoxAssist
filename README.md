@@ -75,4 +75,4 @@ python -m backend.main
 python -m pytest tests/ -v
 ```
 
-Access the application at **http://localhost:8000**.
+
