@@ -118,5 +118,125 @@ SEED_KB_ARTICLES = [
             "Check for pending Windows Updates and reboot the machine.",
             "Ensure at least 10% of total RAM is available."
         ]
+    },
+    {
+        "id": "kb_git_01",
+        "title": "Git SSH Key Permission Denied and Agent Setup",
+        "category": "Developer Tools",
+        "keywords": ["git", "github", "gitlab", "ssh", "permission denied", "publickey", "id_rsa", "ssh-add"],
+        "steps": [
+            "Verify SSH agent is running in terminal by calling 'eval $(ssh-agent -s)'.",
+            "Add your private key to SSH agent via 'ssh-add ~/.ssh/id_ed25519' or 'ssh-add ~/.ssh/id_rsa'.",
+            "Copy public key 'cat ~/.ssh/id_ed25519.pub' and add it under GitHub/GitLab SSH Settings.",
+            "Test connection by running 'ssh -T git@github.com'."
+        ]
+    },
+    {
+        "id": "kb_docker_01",
+        "title": "Docker Daemon Socket Failure and Port Binding Errors",
+        "category": "Cloud & DevOps",
+        "keywords": ["docker", "container", "socket", "daemon", "port", "port in use", "docker.sock"],
+        "steps": [
+            "Verify Docker Desktop service status and restart it from the system tray menu.",
+            "If 'bind: address already in use' occurs, find process via 'netstat -ano | grep <port>' and kill process ID.",
+            "On Linux/macOS, ensure user belongs to docker group via 'sudo usermod -aG docker $USER'.",
+            "Reset Docker daemon to factory defaults via Docker Desktop Troubleshoot menu if daemon hangs."
+        ]
+    },
+    {
+        "id": "kb_env_01",
+        "title": "Node.js and Python Virtual Environment Path Misconfiguration",
+        "category": "Developer Tools",
+        "keywords": ["node", "npm", "python", "pip", "venv", "path", "command not found", "virtualenv"],
+        "steps": [
+            "Verify Python virtual environment is activated ('source venv/bin/activate' or '.\\venv\\Scripts\\Activate.ps1').",
+            "Confirm active executable path using 'which python' / 'where.exe python' and 'which npm'.",
+            "Clear npm cache using 'npm cache clean --force' and delete node_modules before 'npm install'.",
+            "Update PATH environment variable in System Settings to point to installed runtime binaries."
+        ]
+    },
+    {
+        "id": "kb_sec_01",
+        "title": "BitLocker and FileVault Disk Encryption Recovery Prompt",
+        "category": "Security",
+        "keywords": ["bitlocker", "filevault", "encryption", "recovery key", "tpm", "disk lock", "boot"],
+        "steps": [
+            "Retrieve 48-digit BitLocker recovery key from Microsoft Azure AD Portal or company IT self-serve portal.",
+            "On macOS FileVault, retrieve recovery key from company MDM (Jamf) console.",
+            "Type recovery key carefully into blue boot prompt screen.",
+            "If prompt recurs on every reboot, suspend BitLocker in Windows and re-enable after BIOS update."
+        ]
+    },
+    {
+        "id": "kb_edr_01",
+        "title": "SentinelOne and CrowdStrike EDR False Positive Quarantine",
+        "category": "Security",
+        "keywords": ["sentinelone", "crowdstrike", "edr", "quarantine", "antivirus", "false positive", "blocked"],
+        "steps": [
+            "Check the desktop EDR tray icon notification to identify the quarantined executable path.",
+            "Do NOT attempt to manually rename or bypass security agent files.",
+            "Verify file checksum against corporate approved software directory.",
+            "Submit an IT Security exclusion request ticket with file path and hash for analyst release."
+        ]
+    },
+    {
+        "id": "kb_cloud_01",
+        "title": "AWS and Azure CLI SSO Credentials Expiration Flow",
+        "category": "Cloud",
+        "keywords": ["aws", "azure", "cloud", "cli", "sso", "credentials", "expired", "token", "kubectl"],
+        "steps": [
+            "Run 'aws sso login --profile <profile-name>' or 'az login --use-device-code' in terminal.",
+            "Complete browser MFA challenge prompt.",
+            "Verify credentials by calling 'aws sts get-caller-identity' or 'az account show'.",
+            "Refresh your local kubeconfig via 'aws eks update-kubeconfig' if accessing Kubernetes clusters."
+        ]
+    },
+    {
+        "id": "kb_saas_01",
+        "title": "Slack, Jira, and Confluence SSO Redirect Loop and Permissions",
+        "category": "SaaS",
+        "keywords": ["slack", "jira", "confluence", "sso", "redirect loop", "atlassian", "permissions"],
+        "steps": [
+            "Clear site cookies for *.atlassian.net and *.slack.com in browser settings.",
+            "Sign out of all secondary Google/Okta accounts in the browser.",
+            "Open an Incognito / Private window and log in through your corporate SSO portal.",
+            "If workspace permissions error shows, request role assignment via IT Access Portal."
+        ]
+    },
+    {
+        "id": "kb_dock_01",
+        "title": "USB-C Dock and DisplayLink External Monitor Resolution Failure",
+        "category": "Hardware",
+        "keywords": ["dock", "docking", "usb-c", "displaylink", "monitor", "resolution", "display", "dual monitor"],
+        "steps": [
+            "Unplug power cord from the USB-C dock, wait 10 seconds, and plug power back in.",
+            "Ensure laptop Thunderbolt / USB-C port supports DisplayPort Alt Mode.",
+            "Update DisplayLink Manager app to latest version on macOS/Windows.",
+            "Press Win + P (or macOS Displays settings) and select 'Extend' desktop."
+        ]
+    },
+    {
+        "id": "kb_audio_01",
+        "title": "Bluetooth Headset Pairing Failure and Input Mute Lock",
+        "category": "Hardware",
+        "keywords": ["bluetooth", "headset", "headphones", "pairing", "mic mute", "audio", "airpods"],
+        "steps": [
+            "Remove headset from Windows/macOS Bluetooth device list ('Forget Device').",
+            "Hold power/pairing button on headset for 7 seconds until LED blinks pairing mode.",
+            "Re-pair headset in Bluetooth settings and set as Default Communication Device.",
+            "Unmute hardware physical switch on headset boom mic."
+        ]
+    },
+    {
+        "id": "kb_phish_01",
+        "title": "Suspicious Email Reporting and Phishing Attachment Isolation",
+        "category": "Security",
+        "keywords": ["phishing", "suspicious", "spam", "email", "attachment", "malware", "report"],
+        "steps": [
+            "Do NOT click any links, open attachments, or reply to the email.",
+            "Click the 'Report Phishing' button in Outlook ribbon or web toolbar.",
+            "If an attachment was accidentally opened, immediately disconnect Wi-Fi/Ethernet cable.",
+            "Alert IT Security team immediately via phone or helpdesk chat."
+        ]
     }
 ]

@@ -287,6 +287,7 @@ function connectWebSocket() {
         micBtn.classList.add('active');
         micBtnText.textContent = 'End Session';
         interruptBtn.disabled = false;
+        startKeepAliveWatchdog();
     };
 
     ws.onmessage = (event) => {
@@ -302,6 +303,7 @@ function connectWebSocket() {
         micBtnText.textContent = 'Start Session';
         interruptBtn.disabled = true;
         updateState('idle');
+        stopKeepAliveWatchdog();
         stopSpeechListening();
         window.speechSynthesis.cancel();
         stopRimeAudio();
@@ -579,11 +581,26 @@ function initSpeechRecognition() {
             }
         };
 
+        let watchdogCheckInterval = null;
+
         speechRecognition.onend = () => {
             clearSilenceTimer();
             isListeningSpeech = false;
-            if (isSessionActive && !isSpeakingAudio) {
-                setTimeout(() => startSpeechListening(), 500);
+            if (isSessionActive) {
+                if (!isSpeakingAudio) {
+                    setTimeout(() => startSpeechListening(), 300);
+                } else {
+                    // If recognizer ended while agent was speaking, poll until speaking finishes
+                    if (watchdogCheckInterval) clearInterval(watchdogCheckInterval);
+                    watchdogCheckInterval = setInterval(() => {
+                        if (!isSessionActive) {
+                            clearInterval(watchdogCheckInterval);
+                        } else if (!isSpeakingAudio) {
+                            clearInterval(watchdogCheckInterval);
+                            startSpeechListening();
+                        }
+                    }, 400);
+                }
             }
         };
 
@@ -591,10 +608,29 @@ function initSpeechRecognition() {
             clearSilenceTimer();
             console.warn('Speech Recognition Warning:', e.error);
             isListeningSpeech = false;
-            if (isSessionActive && e.error !== 'aborted' && !isSpeakingAudio) {
-                setTimeout(() => startSpeechListening(), 1000);
+            if (isSessionActive && e.error !== 'aborted') {
+                setTimeout(() => startSpeechListening(), 800);
             }
         };
+    }
+}
+
+let keepAliveWatchdogTimer = null;
+
+function startKeepAliveWatchdog() {
+    stopKeepAliveWatchdog();
+    keepAliveWatchdogTimer = setInterval(() => {
+        if (isSessionActive && !isSpeakingAudio && !isListeningSpeech) {
+            console.log('[VAD Watchdog] Speech recognition inactive during session — restarting...');
+            startSpeechListening();
+        }
+    }, 2000);
+}
+
+function stopKeepAliveWatchdog() {
+    if (keepAliveWatchdogTimer) {
+        clearInterval(keepAliveWatchdogTimer);
+        keepAliveWatchdogTimer = null;
     }
 }
 
@@ -604,7 +640,14 @@ function startSpeechListening() {
             speechRecognition.lang = conversationLang;
             speechRecognition.start();
             isListeningSpeech = true;
-        } catch (e) {}
+        } catch (e) {
+            if (e.name === 'InvalidStateError') {
+                isListeningSpeech = true;
+            } else {
+                console.warn('startSpeechListening error:', e);
+                isListeningSpeech = false;
+            }
+        }
     }
 }
 
@@ -613,7 +656,9 @@ function stopSpeechListening() {
         try {
             speechRecognition.stop();
             isListeningSpeech = false;
-        } catch (e) {}
+        } catch (e) {
+            isListeningSpeech = false;
+        }
     }
 }
 

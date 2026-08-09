@@ -1,4 +1,6 @@
+from redis import asyncio
 import json
+import asyncio
 import logging
 from typing import Dict, Any, List, Optional
 import redis.asyncio as aioredis
@@ -27,34 +29,46 @@ class RedisSessionStore:
             self.use_redis = False
 
     async def get_session(self, session_id: str) -> Dict[str, Any]:
+        if session_id in self._local_cache:
+            return self._local_cache[session_id]
+
         if self.use_redis and self.redis:
             try:
                 data = await self.redis.get(f"session:{session_id}")
                 if data:
-                    return json.loads(data)
+                    session = json.loads(data)
+                    self._local_cache[session_id] = session
+                    return session
             except Exception as e:
                 logger.error(f"Error fetching from Redis: {e}")
         
-        return self._local_cache.get(session_id, {
+        default_session = {
+            "session_id": session_id,
             "state": "idle",
             "last_turns": [],
             "device_context": "Windows 11, Corporate Workstation",
             "current_kb_id": None,
             "current_step_index": 0,
             "ticket_draft": None
-        })
+        }
+        self._local_cache[session_id] = default_session
+        return default_session
 
-    async def update_session(self, session_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
-        session = await self.get_session(session_id)
-        session.update(updates)
-        
+    async def _persist_to_redis(self, session_id: str, session: Dict[str, Any]):
         if self.use_redis and self.redis:
             try:
                 await self.redis.setex(f"session:{session_id}", 3600, json.dumps(session))
             except Exception as e:
-                logger.error(f"Error updating Redis: {e}")
-        
+                logger.error(f"Error persisting session to Redis: {e}")
+
+    async def update_session(self, session_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+        session = await self.get_session(session_id)
+        session.update(updates)
         self._local_cache[session_id] = session
+        
+        if self.use_redis and self.redis:
+            asyncio.create_task(self._persist_to_redis(session_id, session))
+        
         return session
 
     async def set_state(self, session_id: str, state: str) -> Dict[str, Any]:
@@ -65,8 +79,8 @@ class RedisSessionStore:
         session = await self.get_session(session_id)
         turns = session.get("last_turns", [])
         turns.append({"role": role, "text": text})
-        if len(turns) > 10:
-            turns = turns[-10:]
+        if len(turns) > 6:
+            turns = turns[-6:]
         return await self.update_session(session_id, {"last_turns": turns})
 
     async def publish_interrupt(self, session_id: str):

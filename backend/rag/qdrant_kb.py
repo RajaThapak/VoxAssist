@@ -18,13 +18,13 @@ except ImportError:
     HAS_QDRANT = False
 
 try:
-    from openai import AsyncOpenAI
-    HAS_OPENAI = True
+    from fastembed import TextEmbedding
+    HAS_FASTEMBED = True
 except ImportError:
-    HAS_OPENAI = False
+    HAS_FASTEMBED = False
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIM = 1536
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+EMBEDDING_DIM = 384
 
 
 def _article_point_id(article_id: str) -> str:
@@ -38,24 +38,36 @@ def _article_embedding_text(article: Dict[str, Any]) -> str:
 
 class QdrantKBManager:
     """
-    Handles Qdrant vector database indexing and semantic retrieval using real
-    OpenAI embeddings, falling back to keyword/topic matching when Qdrant or
-    the embeddings API is unavailable.
+    Handles Qdrant vector database indexing and semantic retrieval using local
+    FastEmbed ONNX embeddings (dim=384, BAAI/bge-small-en-v1.5), with ultra-fast
+    in-memory cosine search acceleration (< 1ms) and Qdrant Cloud fallback.
     """
     def __init__(self):
         self.client: Optional[Any] = None
-        self.embed_client: Optional[Any] = None
+        self.embed_model: Optional[Any] = None
         self.use_qdrant: bool = False
         self.collection_name = "kb_vectors"
+        self._local_articles: List[Dict[str, Any]] = []
+        self._local_matrix: Optional[Any] = None
+        self._local_matrix_norm: Optional[Any] = None
 
     async def init_db(self):
         # Save seed articles into Mongo / local store first
         mongo_store.save_kb_articles(SEED_KB_ARTICLES)
 
-        if HAS_OPENAI and settings.is_openai_live:
-            self.embed_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        if HAS_FASTEMBED:
+            try:
+                logger.info(f"Initializing local FastEmbed model ({EMBEDDING_MODEL})...")
+                self.embed_model = await asyncio.to_thread(TextEmbedding, model_name=EMBEDDING_MODEL)
+                logger.info("Local FastEmbed ONNX embedding engine ready.")
+            except Exception as e:
+                logger.error(f"FastEmbed initialization error: {e}")
+                self.embed_model = None
 
-        if HAS_QDRANT and settings.QDRANT_URL and self.embed_client:
+        if self.embed_model:
+            await self._seed_local_memory_vectors()
+
+        if HAS_QDRANT and settings.QDRANT_URL and self.embed_model:
             try:
                 self.client = QdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY or None, timeout=5)
                 self.client.get_collections()
@@ -63,20 +75,45 @@ class QdrantKBManager:
                 self._create_collection_if_needed()
                 await self._seed_qdrant_vectors()
                 if self.use_qdrant:
-                    logger.info("Qdrant Vector DB connected and seeded with real OpenAI embeddings.")
+                    logger.info("Qdrant Vector DB connected and seeded with FastEmbed ONNX (local) embeddings (dim=384).")
                 return
             except Exception as e:
-                logger.warning(f"Qdrant connection unavailable ({e}). Using keyword search fallback.")
+                logger.warning(f"Qdrant connection unavailable ({e}). Using in-memory & keyword search fallback.")
                 self.use_qdrant = False
         else:
-            logger.warning("Qdrant client or live OpenAI embeddings unavailable. Using keyword search fallback.")
+            logger.warning("Qdrant client unavailable. Using in-memory & keyword search fallback.")
             self.use_qdrant = False
+
+    async def _seed_local_memory_vectors(self):
+        try:
+            import numpy as np
+            self._local_articles = SEED_KB_ARTICLES
+            texts = [_article_embedding_text(a) for a in self._local_articles]
+            embeddings = await self._embed_texts(texts)
+            if embeddings:
+                matrix = np.array(embeddings, dtype=np.float32)
+                norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+                norms[norms == 0] = 1.0
+                self._local_matrix = matrix
+                self._local_matrix_norm = matrix / norms
+                logger.info(f"In-memory vector index initialized with {len(self._local_articles)} KB articles (dim={EMBEDDING_DIM}).")
+        except Exception as e:
+            logger.error(f"Error seeding in-memory vector index: {e}")
 
     def _create_collection_if_needed(self):
         if not self.use_qdrant or not self.client:
             return
         try:
             collections = [c.name for c in self.client.get_collections().collections]
+            if self.collection_name in collections:
+                # Check vector size dimension
+                col_info = self.client.get_collection(self.collection_name)
+                current_size = getattr(col_info.config.params.vectors, 'size', None)
+                if current_size != EMBEDDING_DIM:
+                    logger.warning(f"Recreating Qdrant collection '{self.collection_name}' (dimension mismatch {current_size} != {EMBEDDING_DIM}).")
+                    self.client.delete_collection(self.collection_name)
+                    collections.remove(self.collection_name)
+
             if self.collection_name not in collections:
                 self.client.create_collection(
                     collection_name=self.collection_name,
@@ -86,13 +123,13 @@ class QdrantKBManager:
             logger.error(f"Error creating Qdrant collection: {e}")
 
     async def _embed_texts(self, texts: List[str]) -> Optional[List[List[float]]]:
-        if not self.embed_client:
+        if not self.embed_model:
             return None
         try:
-            response = await self.embed_client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
-            return [item.embedding for item in response.data]
+            embeddings_generator = await asyncio.to_thread(lambda: list(self.embed_model.embed(texts)))
+            return [emb.tolist() for emb in embeddings_generator]
         except Exception as e:
-            logger.error(f"OpenAI embeddings error: {e}")
+            logger.error(f"FastEmbed embedding error: {e}")
             return None
 
     async def _seed_qdrant_vectors(self):
@@ -115,29 +152,41 @@ class QdrantKBManager:
 
     async def embed_query(self, query: str) -> Optional[List[float]]:
         """
-        Embeds a single query string for callers that want to reuse the
-        embedding themselves (e.g. comparing it against a cached topic
-        embedding before deciding whether a fresh Qdrant search is needed).
-        Returns None if embeddings are unavailable.
+        Embeds a single query string using local FastEmbed ONNX engine.
         """
-        if not self.use_qdrant or not self.embed_client or not query.strip():
+        if not self.embed_model or not query.strip():
             return None
         embeddings = await self._embed_texts([query])
         return embeddings[0] if embeddings else None
 
     async def search_kb_by_embedding(self, query: str, embedding: List[float], limit: int = 2) -> List[Dict[str, Any]]:
         """
-        Vector search using an already-computed query embedding — skips
-        re-embedding for callers that already have one. Falls back to
-        keyword/topic matching on failure, same as search_kb.
+        Vector search using an already-computed query embedding:
+        1. Fast in-memory NumPy matrix cosine search (< 1ms)
+        2. Qdrant Cloud fallback if in-memory index is not present
         """
+        if self._local_matrix_norm is not None and embedding:
+            try:
+                import numpy as np
+                q_vec = np.array(embedding, dtype=np.float32)
+                q_norm = np.linalg.norm(q_vec)
+                if q_norm > 0:
+                    q_unit = q_vec / q_norm
+                    scores = np.dot(self._local_matrix_norm, q_unit)
+                    top_indices = np.argsort(scores)[::-1][:limit]
+                    results = []
+                    for idx in top_indices:
+                        art = self._local_articles[idx]
+                        item = dict(art)
+                        item.pop("_id", None)
+                        results.append(item)
+                    if results:
+                        return results
+            except Exception as e:
+                logger.error(f"In-memory vector search error: {e}")
+
         if self.use_qdrant and self.client and embedding:
             try:
-                # self.client is the sync QdrantClient — query_points() is a
-                # blocking network call, so it's offloaded to a worker thread
-                # instead of running directly on the asyncio event loop (which
-                # would otherwise stall every other concurrent task, including
-                # barge-in handling, for the duration of the network round trip).
                 response = await asyncio.to_thread(
                     self.client.query_points,
                     collection_name=self.collection_name,

@@ -435,6 +435,7 @@ class AgentOrchestrator:
             tools=[CREATE_TICKET_TOOL_SPEC, END_SESSION_TOOL_SPEC],
             tool_choice="auto",
             temperature=0.4,
+            max_tokens=80,
             stream=True
         )
 
