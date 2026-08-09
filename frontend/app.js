@@ -63,6 +63,7 @@ const STATE_COLORS = {
     listening: '#14b8e8',
     thinking: '#f59e0b',
     speaking: '#8b5cf6',
+    sleeping: '#a78bfa',
     interrupted: '#ef4444',
     escalating: '#eab308'
 };
@@ -91,6 +92,7 @@ const EXPRESSIONS = {
     listening: { eyeHeight: 36, mouthWidth: 30, mouthHeight: 9 },
     thinking: { eyeHeight: 24, mouthWidth: 26, mouthHeight: 8 },
     speaking: { eyeHeight: 30, mouthWidth: 30, mouthHeight: 10 },
+    sleeping: { eyeHeight: 4, mouthWidth: 18, mouthHeight: 4 },
     interrupted: { eyeHeight: 40, mouthWidth: 20, mouthHeight: 8 },
     escalating: { eyeHeight: 30, mouthWidth: 30, mouthHeight: 10 }
 };
@@ -288,6 +290,7 @@ function connectWebSocket() {
         micBtnText.textContent = 'End Session';
         interruptBtn.disabled = false;
         startKeepAliveWatchdog();
+        resetInactivityWatchdog();
     };
 
     ws.onmessage = (event) => {
@@ -304,6 +307,7 @@ function connectWebSocket() {
         interruptBtn.disabled = true;
         updateState('idle');
         stopKeepAliveWatchdog();
+        clearInactivityWatchdog();
         stopSpeechListening();
         window.speechSynthesis.cancel();
         stopRimeAudio();
@@ -323,24 +327,138 @@ function toggleSession() {
     }
 }
 
+let sleepTransitionTimer = null;
+let autoWakeTimer = null;
+let inactivityWarningTimer = null;
+let inactivityPauseTimer = null;
+let lastTurnSpokenText = '';
+
+function clearSleepTimers() {
+    if (sleepTransitionTimer) {
+        clearTimeout(sleepTransitionTimer);
+        sleepTransitionTimer = null;
+    }
+    if (autoWakeTimer) {
+        clearTimeout(autoWakeTimer);
+        autoWakeTimer = null;
+    }
+}
+
+let isAwaitingInactivityPause = false;
+
+function clearInactivityWatchdog() {
+    if (inactivityWarningTimer) {
+        clearTimeout(inactivityWarningTimer);
+        inactivityWarningTimer = null;
+    }
+    if (inactivityPauseTimer) {
+        clearTimeout(inactivityPauseTimer);
+        inactivityPauseTimer = null;
+    }
+    isAwaitingInactivityPause = false;
+}
+
+function speakServerPrompt(text, isEndingSession = false) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        if (isEndingSession) {
+            pendingSessionEnd = true;
+        }
+        ws.send(JSON.stringify({ type: 'speak_prompt', text }));
+    } else {
+        speakBrowserUtterance(text, () => {
+            if (isEndingSession) {
+                updateState('idle');
+            } else {
+                updateState('listening');
+                setTimeout(() => startSpeechListening(), 500);
+            }
+        });
+    }
+}
+
+function resetInactivityWatchdog() {
+    clearInactivityWatchdog();
+    if (!isSessionActive) return;
+
+    // 1. First warning after 25 seconds of silence
+    inactivityWarningTimer = setTimeout(() => {
+        if (isSessionActive && !isSpeakingAudio) {
+            isAwaitingInactivityPause = true;
+            const checkInText = "Are you still there? Take your time, or let me know if you're ready for the next step.";
+            speakServerPrompt(checkInText);
+        }
+    }, 25000);
+
+    // 2. Auto-pause & end session after 50 seconds of total silence (25s warning + 25s pause)
+    inactivityPauseTimer = setTimeout(() => {
+        if (isSessionActive) {
+            isAwaitingInactivityPause = false;
+            const pauseText = "It looks like you might be away for now. Pausing our session — tap Start Session whenever you're back!";
+            speakServerPrompt(pauseText, true);
+        }
+    }, 50000);
+}
+
 // Runs after the agent finishes speaking a normal (non-greeting) turn — either
 // closes the session if one was pending, or goes back to listening.
 function onAgentSpeechComplete() {
     if (pendingSessionEnd) {
         pendingSessionEnd = false;
-        agentCaptionText.textContent = 'Session ended. Tap Start Session to begin again.';
+        isSessionActive = false;
+        agentCaptionText.textContent = 'Session ended due to inactivity. Tap Start Session to begin again.';
         updateState('idle');
+        stopSpeechListening();
+        stopKeepAliveWatchdog();
+        clearInactivityWatchdog();
+        clearSleepTimers();
         if (ws) ws.close();
         return;
     }
+
+    const fullSpoken = lastTurnSpokenText.trim().toLowerCase();
+    lastTurnSpokenText = '';
+
     updateState('listening');
-    setTimeout(() => startSpeechListening(), 800);
+    setTimeout(() => startSpeechListening(), 300);
+
+    if (!isAwaitingInactivityPause) {
+        resetInactivityWatchdog();
+    }
+
+    const isStepTurn = /step|first|next|turn|restart|unplug|plug|press|hold|wait|forget|re-select|open|check|select|disconnect|connect|type|run|clear/i.test(fullSpoken);
+
+    if (isStepTurn) {
+        clearSleepTimers();
+
+        // 1. Auto-sleep transition after 1.5 seconds
+        sleepTransitionTimer = setTimeout(() => {
+            if (isSessionActive && !isSpeakingAudio) {
+                updateState('sleeping');
+            }
+        }, 1500);
+
+        // 2. Parse duration (e.g. "wait 5 seconds") for Timer Auto-Wake
+        const timeMatch = fullSpoken.match(/(\d+)\s*(?:sec|second)/i);
+        if (timeMatch && timeMatch[1]) {
+            const seconds = parseInt(timeMatch[1], 10);
+            const wakeDelayMs = (seconds + 2) * 1000;
+            autoWakeTimer = setTimeout(() => {
+                if (isSessionActive) {
+                    clearSleepTimers();
+                    const wakeText = "Time's up! Did that resolve your issue?";
+                    speakServerPrompt(wakeText);
+                }
+            }, wakeDelayMs);
+        }
+    }
 }
 
 function resetTtsQueue() {
     ttsQueue = [];
     ttsStreamEnded = false;
     isPlayingQueue = false;
+    lastTurnSpokenText = '';
+    clearSleepTimers();
 }
 
 // Queues one spoken segment (a sentence, or a whole short reply) and starts
@@ -365,6 +483,7 @@ function playNextInQueue() {
 
     isPlayingQueue = true;
     const segment = ttsQueue.shift();
+    lastTurnSpokenText += segment.text + ' ';
     lastBotSpokenText = segment.text.toLowerCase();
     agentCaptionText.textContent = segment.text;
     conversationLang = detectTextLang(segment.text);
@@ -520,6 +639,8 @@ function initSpeechRecognition() {
 
         function sendAndReset(source, resultAt) {
             clearSilenceTimer();
+            clearSleepTimers();
+            resetInactivityWatchdog();
             const cleanText = latestTranscript.trim();
             latestTranscript = '';
             const lowerClean = cleanText.toLowerCase();

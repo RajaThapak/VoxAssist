@@ -117,6 +117,26 @@ async def websocket_endpoint(websocket: WebSocket):
                     task = asyncio.create_task(orchestrator.process_user_turn(text))
                     orchestrator.interrupt_controller.register_tasks(llm_task=task)
 
+            elif msg_type == "speak_prompt":
+                text = data.get("text", "").strip()
+                if text:
+                    audio_bytes = await rime_tts.synthesize_speech(text)
+                    if audio_bytes:
+                        await send_ws_event({
+                            "type": "tts_audio_segment",
+                            "index": 0,
+                            "text_segment": text,
+                            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+                            "mime": "audio/mp3"
+                        })
+                    else:
+                        await send_ws_event({
+                            "type": "tts_text_segment",
+                            "index": 0,
+                            "text_segment": text
+                        })
+                    await send_ws_event({"type": "tts_stream_end"})
+
             elif msg_type == "ping":
                 await send_ws_event({"type": "pong"})
 

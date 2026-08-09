@@ -266,6 +266,20 @@ body {
     box-shadow: 0 0 0 8px rgba(234, 179, 8, 0.2), 0 12px 40px rgba(234, 179, 8, 0.3);
 }
 
+.face-glow-container.sleeping {
+    box-shadow: 0 0 0 8px rgba(167, 139, 250, 0.18), 0 12px 40px rgba(167, 139, 250, 0.28);
+}
+
+.face-glow-container.sleeping .eye-led,
+.face-glow-container.sleeping .mouth-led {
+    animation: ledSleepBreathe 3.5s ease-in-out infinite;
+}
+
+@keyframes ledSleepBreathe {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 0.75; }
+}
+
 @keyframes pulseFlash {
     from { transform: scale(1); }
     to { transform: scale(1.03); }

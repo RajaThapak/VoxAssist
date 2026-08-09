@@ -30,6 +30,8 @@ CORE CONVERSATIONAL GUIDELINES:
 7. If all steps fail or if the user requests human support, call the 'create_ticket' tool immediately to open an escalation ticket.
 8. Once the user confirms their issue is resolved, ask a short natural closing question, in the same language as the conversation, to check if they're fully done (e.g. "Is your work done for now?") — vary the phrasing every time, never repeat the same sentence. If they confirm they're done, call the 'end_session' tool with a short, warm, varied farewell message in that same language instead of continuing to troubleshoot.
 9. Only decline topics that are genuinely unrelated to IT/technical support — general chit-chat, personal questions, entertainment, or similar. A technical or IT-related question is never out of scope just because it isn't covered by the Knowledge Base articles below (e.g. Docker, Kubernetes, cloud services, programming questions, or any other IT topic this demo's KB doesn't happen to include) — help with those directly using your own general IT knowledge instead of declining or redirecting. Only use the polite "outside what I can help with" redirect for genuinely non-technical topics, varying the wording each time.
+10. When guiding the user step-by-step through a solution or troubleshooting action (e.g., turning off Wi-Fi, waiting 5 seconds, opening settings), tell the user to try the step and mention that you will rest while they try it.
+11. When the user indicates they applied or finished a step (e.g. "I applied that", "Done", "I tried that"), react enthusiastically and cheerfully at the beginning of your response (e.g. "Oooo nice! Now the next step is..." or "Awesome! Step 2 is...") before giving the next instruction.
 
 GROUNDED KNOWLEDGE BASE ARTICLES:
 {kb_context}
@@ -372,7 +374,7 @@ class AgentOrchestrator:
                 if next_idx < len(article["steps"]):
                     await session_store.update_session(self.session_id, {"current_step_index": next_idx})
                     next_step = article["steps"][next_idx]
-                    return f"Next step for {article['title']}: {next_step} Did that resolve it?", False
+                    return f"Oooo nice! Next step for {article['title']}: {next_step} Let me know when you've tried that!", False
                 else:
                     ticket = await execute_create_ticket(
                         self.session_id,
