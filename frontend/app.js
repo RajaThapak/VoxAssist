@@ -737,7 +737,9 @@ function initSpeechRecognition() {
 
         speechRecognition.onerror = (e) => {
             clearSilenceTimer();
-            console.warn('Speech Recognition Warning:', e.error);
+            if (e.error !== 'aborted' && e.error !== 'no-speech') {
+                console.warn('Speech Recognition Warning:', e.error);
+            }
             isListeningSpeech = false;
             if (isSessionActive && e.error !== 'aborted') {
                 setTimeout(() => startSpeechListening(), 800);
