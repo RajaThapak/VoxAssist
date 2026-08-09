@@ -272,6 +272,16 @@ function initEvents() {
     interruptBtn.addEventListener('click', triggerBargeIn);
     ticketsBtn.addEventListener('click', loadAndShowTickets);
     closeTicketsBtn.addEventListener('click', () => ticketsModal.hidden = true);
+    ticketsModal.addEventListener('click', (e) => {
+        if (e.target === ticketsModal) {
+            ticketsModal.hidden = true;
+        }
+    });
+    window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !ticketsModal.hidden) {
+            ticketsModal.hidden = true;
+        }
+    });
 }
 
 // WebSocket Connection
@@ -430,12 +440,12 @@ function onAgentSpeechComplete() {
     if (isStepTurn) {
         clearSleepTimers();
 
-        // 1. Auto-sleep transition after 1.5 seconds
+        // 1. Auto-sleep transition after 8 seconds
         sleepTransitionTimer = setTimeout(() => {
             if (isSessionActive && !isSpeakingAudio) {
                 updateState('sleeping');
             }
-        }, 1500);
+        }, 8000);
 
         // 2. Parse duration (e.g. "wait 5 seconds") for Timer Auto-Wake
         const timeMatch = fullSpoken.match(/(\d+)\s*(?:sec|second)/i);

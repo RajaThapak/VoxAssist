@@ -6,6 +6,7 @@ load_dotenv()
 
 class Settings:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "mock_key")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "mock_key")
     RIME_API_KEY: str = os.getenv("RIME_API_KEY", "mock_key")
     RIME_VOICE_ID: str = os.getenv("RIME_VOICE_ID", "marcus")
     RIME_SPEAKER_SPEED: float = float(os.getenv("RIME_SPEAKER_SPEED", "1.0"))
@@ -20,6 +21,10 @@ class Settings:
     
     PORT: int = int(os.getenv("PORT", "8000"))
     HOST: str = os.getenv("HOST", "0.0.0.0")
+
+    @property
+    def is_groq_live(self) -> bool:
+        return bool(self.GROQ_API_KEY and self.GROQ_API_KEY != "mock_key" and not self.GROQ_API_KEY.startswith("your_"))
 
     @property
     def is_openai_live(self) -> bool:

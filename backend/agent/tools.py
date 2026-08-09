@@ -50,7 +50,23 @@ END_SESSION_TOOL_SPEC = {
     }
 }
 
+from backend.storage.redis_session import session_store
+
 async def execute_create_ticket(session_id: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    session = await session_store.get_session(session_id)
+    existing_ticket_id = session.get("created_ticket_id")
+    if existing_ticket_id:
+        logger.info(f"Session {session_id} already has ticket {existing_ticket_id}. Reusing existing ticket.")
+        return {
+            "status": "success",
+            "message": f"Escalation ticket {existing_ticket_id} is already open.",
+            "ticket": {
+                "ticket_id": existing_ticket_id,
+                "session_id": session_id,
+                "status": "escalated"
+            }
+        }
+
     issue_summary = arguments.get("issue_summary", "IT Support Assistance Required")
     steps_tried = arguments.get("steps_tried", [])
     transcript_summary = arguments.get("transcript_summary", "")
@@ -62,6 +78,11 @@ async def execute_create_ticket(session_id: str, arguments: Dict[str, Any]) -> D
         transcript_summary=transcript_summary
     )
     
+    await session_store.update_session(session_id, {
+        "created_ticket_id": ticket["ticket_id"],
+        "has_escalated": True
+    })
+
     return {
         "status": "success",
         "message": f"Escalation ticket {ticket['ticket_id']} has been created successfully.",

@@ -27,10 +27,10 @@ CORE CONVERSATIONAL GUIDELINES:
 4. Guide the user step-by-step through a fix, giving ONE clear instruction at a time and ending with a short confirming question.
 5. If the user's issue matches one of the Knowledge Base articles below, ground your troubleshooting advice strictly in that article's exact steps (translate/paraphrase naturally into whatever language the conversation is in) — do not invent or substitute different steps for a topic the KB already covers.
 6. If the user indicates a step didn't work, proceed to the NEXT step in the KB article.
-7. If all steps fail or if the user requests human support, call the 'create_ticket' tool immediately to open an escalation ticket.
+7. NEVER create an escalation ticket automatically without explicit user permission. Only call the 'create_ticket' tool when the user EXPLICITLY asks to escalate/create a ticket (e.g. "create a ticket", "escalate this", "connect me to a human"), OR when the user explicitly agrees/says yes after you ask for permission to open a ticket. If all troubleshooting steps in a Knowledge Base article fail, do NOT immediately call 'create_ticket'; instead, ask the user for permission: "We have tried all troubleshooting steps for this issue. Would you like me to open an IT escalation ticket for a human technician?"
 8. Once the user confirms their issue is resolved, ask a short natural closing question, in the same language as the conversation, to check if they're fully done (e.g. "Is your work done for now?") — vary the phrasing every time, never repeat the same sentence. If they confirm they're done, call the 'end_session' tool with a short, warm, varied farewell message in that same language instead of continuing to troubleshoot.
 9. Only decline topics that are genuinely unrelated to IT/technical support — general chit-chat, personal questions, entertainment, or similar. A technical or IT-related question is never out of scope just because it isn't covered by the Knowledge Base articles below (e.g. Docker, Kubernetes, cloud services, programming questions, or any other IT topic this demo's KB doesn't happen to include) — help with those directly using your own general IT knowledge instead of declining or redirecting. Only use the polite "outside what I can help with" redirect for genuinely non-technical topics, varying the wording each time.
-10. When guiding the user step-by-step through a solution or troubleshooting action (e.g., turning off Wi-Fi, waiting 5 seconds, opening settings), tell the user to try the step and mention that you will rest while they try it.
+10. When guiding the user step-by-step through a solution or troubleshooting action, vary your phrasing naturally from turn to turn (e.g., "Give that a shot!", "Let me know when you've tried that!", "Try that now!"). Never repeat repetitive phrases like "I'll rest while you..." over and over across multiple turns.
 11. When the user indicates they applied or finished a step (e.g. "I applied that", "Done", "I tried that"), react enthusiastically and cheerfully at the beginning of your response (e.g. "Oooo nice! Now the next step is..." or "Awesome! Step 2 is...") before giving the next instruction.
 
 GROUNDED KNOWLEDGE BASE ARTICLES:
@@ -132,11 +132,7 @@ def _find_sentence_boundary(text: str) -> Optional[int]:
     return None
 
 
-# Module-level singleton, created once for the process lifetime and shared
-# across every session — mirrors the Rime client fix. Previously a fresh
-# AsyncOpenAI() (and its own connection pool) was created per WebSocket
-# session, so every session's first LLM call paid a cold TCP+TLS handshake
-# to api.openai.com instead of reusing an already-warm connection.
+_groq_client: Optional[AsyncOpenAI] = AsyncOpenAI(api_key=settings.GROQ_API_KEY, base_url="https://api.groq.com/openai/v1") if settings.is_groq_live else None
 _openai_client: Optional[AsyncOpenAI] = AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if settings.is_openai_live else None
 
 
@@ -145,6 +141,7 @@ class AgentOrchestrator:
         self.session_id = session_id
         self.send_ws_event = send_ws_event
         self.interrupt_controller = InterruptController(session_id)
+        self.groq_client: Optional[AsyncOpenAI] = _groq_client
         self.openai_client: Optional[AsyncOpenAI] = _openai_client
 
     async def process_user_turn(self, user_text: str):
@@ -230,19 +227,21 @@ class AgentOrchestrator:
             await session_store.set_state(self.session_id, "speaking")
             await self.send_ws_event({"type": "state_change", "state": "speaking"})
 
-            # 3. LLM Execution — streamed on the OpenAI side, with Rime synthesis
-            # for each sentence kicked off as soon as that sentence is complete
-            # rather than waiting for the full reply (see _stream_llm_response).
-            # Spoken segments for a plain-text reply are sent to the client from
-            # inside that call, in order, as they're synthesized.
+            # 3. LLM Execution — Groq primary (ultra-low latency ~150ms TTFT), OpenAI fallback
+            clients_to_try = []
+            if self.groq_client and settings.is_groq_live:
+                clients_to_try.append(("Groq", self.groq_client, "llama-3.3-70b-versatile", 15.0))
             if self.openai_client and settings.is_openai_live:
+                clients_to_try.append(("OpenAI", self.openai_client, "gpt-4o-mini", 20.0))
+
+            for provider_name, client_inst, model_name, timeout_secs in clients_to_try:
                 try:
                     t_llm_start = time.monotonic()
                     full_text, tool_call = await asyncio.wait_for(
-                        self._stream_llm_response(messages, turn_started),
-                        timeout=20.0
+                        self._stream_llm_response(messages, turn_started, client=client_inst, model=model_name),
+                        timeout=timeout_secs
                     )
-                    logger.info(f"[latency] LLM generation: {(time.monotonic() - t_llm_start) * 1000:.0f}ms")
+                    logger.info(f"[latency] {provider_name} ({model_name}) LLM generation: {(time.monotonic() - t_llm_start) * 1000:.0f}ms")
 
                     if tool_call:
                         name, args = tool_call
@@ -284,7 +283,7 @@ class AgentOrchestrator:
                     return
 
                 except Exception as e:
-                    logger.error(f"OpenAI Execution Error ({e}). Using offline generator for this turn.")
+                    logger.warning(f"{provider_name} Execution Error ({e}). Trying next provider...")
 
             # Instant Offline Generator Mode
             spoken_reply, should_close = await self._generate_fallback_response(user_text, kb_articles)
@@ -310,6 +309,26 @@ class AgentOrchestrator:
         is_affirmative = _is_affirmative_text(user_text)
         is_negative = _is_negative_text(user_text)
 
+        awaiting_ticket = session.get("awaiting_ticket_permission", False)
+        if awaiting_ticket:
+            await session_store.update_session(self.session_id, {"awaiting_ticket_permission": False})
+            if is_affirmative or any(kw in user_lower for kw in ["yes", "yeah", "please", "sure", "open"]):
+                ticket = await execute_create_ticket(
+                    self.session_id,
+                    {
+                        "issue_summary": user_text,
+                        "steps_tried": ["Attempted all self-serve steps"],
+                        "transcript_summary": f"User approved ticket escalation: {user_text}"
+                    }
+                )
+                ticket_id = ticket["ticket"]["ticket_id"] if isinstance(ticket, dict) and "ticket" in ticket else "TICK-9902"
+                await session_store.update_session(self.session_id, {"current_kb_id": None, "current_step_index": 0})
+                return (f"मैंने आपके लिए एस्केलेशन टिकट {ticket_id} खोल दिया है। एक आईटी विशेषज्ञ जल्द ही आपसे संपर्क करेगा।" if is_hi
+                        else f"I have opened escalation ticket {ticket_id} for you. An IT specialist will follow up shortly."), False
+            elif is_negative:
+                return ("कोई बात नहीं — और किस चीज़ में मदद कर सकता हूँ?" if is_hi
+                        else "No problem — what else can I help you with?"), False
+
         # 0. Follow-up to a previously asked "is your work done?" closing question
         if awaiting_close:
             await session_store.update_session(self.session_id, {"awaiting_close_confirmation": False})
@@ -320,17 +339,17 @@ class AgentOrchestrator:
                         else "No problem — what else can I help you with?"), False
             # Otherwise fall through and treat this turn as a fresh request below.
 
-        # 1. Escalation check
+        # 1. Explicit user request for ticket escalation
         if any(kw in user_lower for kw in [
-            "ticket", "escalate", "human", "agent", "support team",
-            "इंसान", "टिकट", "सपोर्ट", "एस्केलेट"
+            "create a ticket", "make a ticket", "open a ticket", "escalate this", "escalate to human",
+            "human agent", "support technician", "इंसान", "टिकट खोलो", "एस्केलेट"
         ]):
             ticket = await execute_create_ticket(
                 self.session_id,
                 {
                     "issue_summary": user_text,
                     "steps_tried": ["Attempted self-serve steps"],
-                    "transcript_summary": f"User requested ticket escalation: {user_text}"
+                    "transcript_summary": f"User explicitly requested ticket escalation: {user_text}"
                 }
             )
             ticket_id = ticket["ticket"]["ticket_id"] if isinstance(ticket, dict) and "ticket" in ticket else "TICK-9901"
@@ -376,17 +395,9 @@ class AgentOrchestrator:
                     next_step = article["steps"][next_idx]
                     return f"Oooo nice! Next step for {article['title']}: {next_step} Let me know when you've tried that!", False
                 else:
-                    ticket = await execute_create_ticket(
-                        self.session_id,
-                        {
-                            "issue_summary": article["title"],
-                            "steps_tried": article["steps"],
-                            "transcript_summary": f"Tried all {len(article['steps'])} steps without resolution."
-                        }
-                    )
-                    ticket_id = ticket["ticket"]["ticket_id"] if isinstance(ticket, dict) and "ticket" in ticket else "TICK-9902"
-                    await session_store.update_session(self.session_id, {"current_kb_id": None, "current_step_index": 0})
-                    return f"We have tried all troubleshooting steps for {article['title']} without success. I have created escalation ticket {ticket_id} for an IT specialist to assist you.", False
+                    await session_store.update_session(self.session_id, {"awaiting_ticket_permission": True})
+                    return (f"हम {article['title']} के लिए सभी चरण आज़मा चुके हैं। क्या आप चाहते हैं कि मैं आईटी विशेषज्ञ का टिकट खोल दूँ?" if is_hi
+                            else f"We have tried all troubleshooting steps for {article['title']}. Would you like me to open an IT escalation ticket for a human technician to assist you?"), False
 
         # Default fallback: if mid-flow on a topic, restate the current step instead of
         # resetting to step 1 (previously caused the same reply to repeat every turn).
@@ -408,31 +419,20 @@ class AgentOrchestrator:
 
         return "I can help walk you through troubleshooting. Could you tell me more about what device or application is giving you trouble?", False
 
-    async def _stream_llm_response(self, messages: List[Dict[str, str]], turn_started: float):
+    async def _stream_llm_response(
+        self,
+        messages: List[Dict[str, str]],
+        turn_started: float,
+        client: Optional[AsyncOpenAI] = None,
+        model: str = "gpt-4o-mini"
+    ):
         """
-        Streams the chat completion and pipelines TTS synthesis with generation:
-        as soon as a complete sentence appears in the streamed text, its Rime
-        synthesis is kicked off immediately as a background task rather than
-        waiting for the rest of the reply to finish generating first. A second
-        coroutine delivers finished segments to the client strictly in order
-        (segment N+1's synthesis can finish before segment N's, since both run
-        concurrently, but it's only ever sent after N has been delivered).
-
-        This targets time-to-first-audio specifically, not total synthesis
-        time — Rime's per-call cost is largely fixed regardless of text length,
-        so a short first sentence doesn't synthesize much faster on its own;
-        the win is that its synthesis now starts as soon as that sentence is
-        known instead of after the entire (often 2-3 sentence) reply is done.
-        Tool-call turns never stream spoken content — the API doesn't mix a
-        tool call with reply text in the same completion — so no segments are
-        produced in that case.
-
-        Returns (full_text, tool_call_or_none) where tool_call is (name, args) if
-        the model called a tool.
+        Streams the chat completion and pipelines TTS synthesis with generation.
         """
+        target_client = client or self.openai_client
         llm_request_sent = time.monotonic()
-        stream = await self.openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+        stream = await target_client.chat.completions.create(
+            model=model,
             messages=messages,
             tools=[CREATE_TICKET_TOOL_SPEC, END_SESSION_TOOL_SPEC],
             tool_choice="auto",

@@ -1,21 +1,21 @@
 # 🎙️ VoxAssist — Real-Time Voice IT Helpdesk Agent
 
-VoxAssist is an ultra-low-latency, voice-first AI Helpdesk Assistant built for enterprise IT support. It combines local ONNX vector embeddings, sentence-pipelined LLM generation, and neural speech synthesis to deliver spoken IT troubleshooting in under 2 seconds.
+VoxAssist is an ultra-low-latency, voice-first AI Helpdesk Assistant built for enterprise IT support. It combines Groq API (`llama-3.3-70b-versatile`), local ONNX vector embeddings, sentence-pipelined streaming, and neural speech synthesis to deliver spoken IT troubleshooting in under 1 second.
 
 ---
 
 ## ✨ Key Features
 
-- ⚡ **Sub-2.0s Voice Latency**: Sentence-pipelined streaming for fast Time-To-First-Audio (TTFA).
+- ⚡ **Sub-1.0s Voice Latency**: Groq API (`llama-3.3-70b-versatile`, ~180ms TTFT) with automatic OpenAI (`gpt-4o-mini`) fallback.
 - ⚡ **Zero-Latency Barge-In Interruption**: Instantly cancels active TTS streams when the user interrupts mid-sentence.
 - 🧠 **FastEmbed ONNX RAG**: Sub-1ms local vector search across 20 enterprise IT topics (`BAAI/bge-small-en-v1.5`).
 - 💾 **In-Memory Write-Through Session Store**: Zero-delay local state updates with background Redis persistence.
-- 💤 **Step-by-Step Sleep Mode**: Auto-sleeps after instructions; wakes up on voice command (*"I applied that"*) or timer.
+- 💤 **Step-by-Step Sleep Mode**: 8-second auto-sleep transition after instructions; wakes up on voice command (*"I applied that"*) or timer.
 - ⏱️ **Inactivity Watchdog**: 25s check-in ("Are you still there?") and 50s auto-pause session termination.
 - 👄 **Real-Time Waveform Lip Sync**: Web Audio API loudness tracking drives SVG mouth animations frame-by-frame.
-- 🎫 **Automated IT Escalation**: Creates structured escalation tickets in MongoDB when troubleshooting fails.
+- 🎫 **Permission-Gated IT Escalation**: Asks explicit user consent before creating MongoDB tickets, with session-level idempotency to prevent duplicate tickets.
 - 🌐 **Multi-Language Support**: Seamless English & Hindi voice and text understanding.
-- 🧪 **Automated Pytest Suite**: Async unit & integration tests (`pytest tests/`) covering REST endpoints, FastEmbed ONNX RAG, session store, and WebSocket streams.
+- 🧪 **Automated Pytest Suite**: 6 async unit & integration tests (`pytest tests/`) covering REST endpoints, FastEmbed ONNX RAG, session store, ticket idempotency, and WebSocket streams.
 
 ---
 
@@ -25,7 +25,7 @@ VoxAssist is an ultra-low-latency, voice-first AI Helpdesk Assistant built for e
 flowchart TD
     Client["Browser Frontend (VAD + Web Audio Lip Sync)"] <-->|WebSocket| WS["FastAPI Server"]
     WS <--> RAG["FastEmbed ONNX Vector Index (<1ms)"]
-    WS <--> LLM["OpenAI GPT-4o-mini (Sentence Streaming)"]
+    WS <--> LLM["Groq llama-3.3-70b / OpenAI gpt-4o-mini"]
     WS <--> TTS["Rime AI Neural Speech Synthesis"]
     WS <--> MONGO["MongoDB (Tickets & KB Storage)"]
     WS <--> REDIS["Redis (Session Store)"]
@@ -54,6 +54,7 @@ pip install -r requirements.txt
 PORT=8000
 HOST=0.0.0.0
 
+GROQ_API_KEY=your_groq_api_key
 OPENAI_API_KEY=your_openai_api_key
 RIME_API_KEY=your_rime_api_key
 

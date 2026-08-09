@@ -498,7 +498,10 @@ body {
     background: #ffffff;
     border: 1px solid var(--card-border);
     width: 90%;
-    max-width: 550px;
+    max-width: 580px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
     border-radius: 20px;
     padding: 1.5rem;
     box-shadow: 0 24px 60px rgba(15, 23, 42, 0.25);
@@ -511,6 +514,7 @@ body {
     margin-bottom: 1rem;
     border-bottom: 1px solid var(--card-border);
     padding-bottom: 0.75rem;
+    flex-shrink: 0;
 }
 
 .modal-header h2 {
@@ -520,11 +524,31 @@ body {
 }
 
 .close-btn {
-    background: none;
-    border: none;
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
     color: var(--text-muted);
-    font-size: 1.5rem;
+    font-size: 1.4rem;
+    line-height: 1;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.close-btn:hover {
+    background: #e2e8f0;
+    color: #0f172a;
+    transform: scale(1.05);
+}
+
+.modal-body {
+    overflow-y: auto;
+    max-height: calc(85vh - 5rem);
+    padding-right: 4px;
 }
 
 .ticket-item {
