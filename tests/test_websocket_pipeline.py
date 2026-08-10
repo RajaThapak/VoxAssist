@@ -1,30 +1,26 @@
 import pytest
-import json
-import websockets
+from fastapi.testclient import TestClient
+from backend.main import app
 
-WS_URI = "ws://localhost:8000/ws/voxassist"
-
-@pytest.mark.asyncio
-async def test_websocket_voice_flow_turn():
-    async with websockets.connect(WS_URI) as ws:
+def test_websocket_voice_flow_turn():
+    client = TestClient(app)
+    with client.websocket_connect("/ws/voxassist") as ws:
         # Handshake
-        conn_raw = await ws.recv()
-        conn_data = json.loads(conn_raw)
+        conn_data = ws.receive_json()
         assert conn_data.get("type") == "connected"
         assert len(conn_data.get("session_id", "")) > 0
 
         # Turn 1
-        await ws.send(json.dumps({
+        ws.send_json({
             "type": "user_speech",
             "text": "My Wi-Fi keeps disconnecting during video calls"
-        }))
+        })
 
         got_speaking = False
         got_audio_segment = False
 
         while True:
-            msg_raw = await ws.recv()
-            event = json.loads(msg_raw)
+            event = ws.receive_json()
             event_type = event.get("type")
 
             if event_type == "state_change" and event.get("state") == "speaking":

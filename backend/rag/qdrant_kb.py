@@ -247,6 +247,9 @@ class QdrantKBManager:
             "mfa": "kb_mfa_01",
             "2fa": "kb_mfa_01",
             "authenticator": "kb_mfa_01",
+            "keyboard": "kb_kbd_01",
+            "keys": "kb_kbd_01",
+            "typing": "kb_kbd_01",
             "printer": "kb_print_01",
             "print": "kb_print_01",
             "disk": "kb_disk_01",
@@ -261,6 +264,14 @@ class QdrantKBManager:
             "lag": "kb_perf_01",
             "performance": "kb_perf_01"
         }
+
+        if not query_text:
+            clean_results = []
+            for art in SEED_KB_ARTICLES[:limit]:
+                item = dict(art)
+                item.pop("_id", None)
+                clean_results.append(item)
+            return clean_results
 
         target_topic_id = None
         for tok in query_tokens:
@@ -294,7 +305,7 @@ class QdrantKBManager:
         results = [art for score, art in matched_articles[:limit]]
 
         if not results:
-            results = SEED_KB_ARTICLES[:limit]
+            return []
 
         clean_results = []
         for art in results:

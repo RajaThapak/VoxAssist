@@ -6,6 +6,8 @@ let currentSessionId = null;
 let speechRecognition = null;
 let isListeningSpeech = false;
 let isSpeakingAudio = false;
+let isProcessingSpeech = false;
+let currentAgentState = 'idle';
 let lastBotSpokenText = "";
 let pendingSessionEnd = false;
 let mouthCloseTimer = null;
@@ -560,9 +562,12 @@ function handleServerEvent(event) {
             updateState(event.state);
             if (event.state === 'thinking') {
                 resetTtsQueue();
+                isProcessingSpeech = true;
+                stopSpeechListening();
             }
             if (event.state === 'listening' && !isSpeakingAudio) {
-                setTimeout(() => startSpeechListening(), 500);
+                isProcessingSpeech = false;
+                setTimeout(() => startSpeechListening(), 300);
             }
             break;
 
@@ -573,6 +578,7 @@ function handleServerEvent(event) {
 
 // Update Robot Face Visual State
 function updateState(state) {
+    currentAgentState = state;
     faceGlow.className = `face-glow-container ${state}`;
     applyExpression(state);
 
@@ -583,8 +589,14 @@ function updateState(state) {
 
     if (state === 'speaking') {
         isSpeakingAudio = true;
-    } else if (state !== 'thinking') {
+        isProcessingSpeech = false;
+    } else if (state === 'thinking') {
+        isProcessingSpeech = true;
+    } else {
         isSpeakingAudio = false;
+        if (state === 'listening' || state === 'idle' || state === 'interrupted') {
+            isProcessingSpeech = false;
+        }
     }
 
     if (state === 'interrupted') {
@@ -603,8 +615,9 @@ function triggerBargeIn() {
         stopRimeAudio();
         resetTtsQueue();
         isSpeakingAudio = false;
+        isProcessingSpeech = false;
         updateState('interrupted');
-        setTimeout(() => startSpeechListening(), 500);
+        setTimeout(() => startSpeechListening(), 300);
     }
 }
 
@@ -623,13 +636,10 @@ function animateLipSync(amplitude) {
     setMouthPill(width, height);
 }
 
-// Web Speech API Integration, with a custom VAD layered on top: the browser's
-// own end-of-speech detection (onspeechend -> final result) is a black box
-// with no configurable timeout and is suspected to be a major contributor to
-// total turn latency. Rather than waiting for it, interim results are used to
-// detect a CUSTOM_VAD_SILENCE_MS pause in speech ourselves and send as soon
-// as that fires — falling back to the browser's own final result if it
-// happens to arrive first.
+// Web Speech API Integration, with custom VAD layered on top:
+// When user speaks, live interim results are captured and shown in the UI.
+// When user pauses for CUSTOM_VAD_SILENCE_MS (600ms), speech capture stops,
+// visual state transitions to 'thinking' (processing), and the prompt is sent to backend.
 function initSpeechRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SpeechRecognition) {
@@ -655,15 +665,18 @@ function initSpeechRecognition() {
             latestTranscript = '';
             const lowerClean = cleanText.toLowerCase();
 
-            // Ignore speech while agent is speaking. Threshold is deliberately low (not
-            // > 2) so short-but-meaningful replies like "ok" and "no" (both exactly
-            // 2 characters) actually get sent instead of being silently dropped.
-            if (cleanText.length > 1 && !isSpeakingAudio) {
+            // Ignore speech while agent is speaking or processing
+            if (cleanText.length > 1 && !isSpeakingAudio && !isProcessingSpeech) {
                 if (GREETING_BLACK_LIST.some(phrase => lowerClean.includes(phrase))) {
                     console.log('Ignored greeting echo feedback:', cleanText);
                 } else if (lastBotSpokenText && lowerClean.includes(lastBotSpokenText.slice(-15))) {
                     console.log('Ignored speaker echo feedback:', cleanText);
                 } else if (ws && ws.readyState === WebSocket.OPEN) {
+                    // Instantly stop catching voice and transition UI to processing/thinking
+                    isProcessingSpeech = true;
+                    stopSpeechListening();
+                    updateState('thinking');
+
                     ws.send(JSON.stringify({ type: 'user_speech', text: cleanText }));
                     const sendAt = performance.now(); // Test 1 point C: WS message sent
                     if (_latSpeechEndAt != null) {
@@ -675,28 +688,28 @@ function initSpeechRecognition() {
                 }
             }
 
-            // Cut off the recognizer's own pending finalization for this
-            // utterance so it can't fire a duplicate/late onresult later —
-            // abort() (unlike stop()) does not produce a trailing final result.
             try { speechRecognition.abort(); } catch (e) {}
+            isListeningSpeech = false;
         }
 
         // Test 1 instrumentation, point A: the browser's own internal signal
-        // that it believes the user has stopped talking — kept so the custom
-        // VAD above can be compared against it directly during live testing.
         speechRecognition.onspeechend = () => {
             _latSpeechEndAt = performance.now();
             console.log('[latency-test] A (onspeechend) at', _latSpeechEndAt.toFixed(0));
         };
 
         speechRecognition.onresult = (event) => {
+            if (isSpeakingAudio || isProcessingSpeech || currentAgentState === 'thinking' || currentAgentState === 'speaking') {
+                return;
+            }
             const resultAt = performance.now();
             let combined = '';
             let sawFinal = false;
-            for (let i = event.resultIndex; i < event.results.length; i++) {
+            for (let i = 0; i < event.results.length; i++) {
                 combined += event.results[i][0].transcript;
                 if (event.results[i].isFinal) sawFinal = true;
             }
+            combined = combined.trim();
             if (!combined) return;
             latestTranscript = combined;
 
@@ -705,9 +718,8 @@ function initSpeechRecognition() {
                 // Browser finished before our custom timer did — use its result immediately.
                 sendAndReset('browser-final', resultAt);
             } else {
-                // Custom VAD: if no further speech arrives within the window,
-                // treat the utterance as complete instead of waiting on the
-                // browser's own (potentially much slower) endpointing.
+                // Custom VAD: if no further speech arrives within the 600ms window,
+                // treat the utterance as complete, stop catching voice, and start processing.
                 silenceTimer = setTimeout(() => sendAndReset('silence-timeout', performance.now()), CUSTOM_VAD_SILENCE_MS);
             }
         };
@@ -717,21 +729,8 @@ function initSpeechRecognition() {
         speechRecognition.onend = () => {
             clearSilenceTimer();
             isListeningSpeech = false;
-            if (isSessionActive) {
-                if (!isSpeakingAudio) {
-                    setTimeout(() => startSpeechListening(), 300);
-                } else {
-                    // If recognizer ended while agent was speaking, poll until speaking finishes
-                    if (watchdogCheckInterval) clearInterval(watchdogCheckInterval);
-                    watchdogCheckInterval = setInterval(() => {
-                        if (!isSessionActive) {
-                            clearInterval(watchdogCheckInterval);
-                        } else if (!isSpeakingAudio) {
-                            clearInterval(watchdogCheckInterval);
-                            startSpeechListening();
-                        }
-                    }, 400);
-                }
+            if (isSessionActive && !isSpeakingAudio && !isProcessingSpeech && (currentAgentState === 'listening' || currentAgentState === 'interrupted')) {
+                setTimeout(() => startSpeechListening(), 300);
             }
         };
 
@@ -741,7 +740,7 @@ function initSpeechRecognition() {
                 console.warn('Speech Recognition Warning:', e.error);
             }
             isListeningSpeech = false;
-            if (isSessionActive && e.error !== 'aborted') {
+            if (isSessionActive && e.error !== 'aborted' && !isSpeakingAudio && !isProcessingSpeech && currentAgentState === 'listening') {
                 setTimeout(() => startSpeechListening(), 800);
             }
         };
@@ -753,8 +752,8 @@ let keepAliveWatchdogTimer = null;
 function startKeepAliveWatchdog() {
     stopKeepAliveWatchdog();
     keepAliveWatchdogTimer = setInterval(() => {
-        if (isSessionActive && !isSpeakingAudio && !isListeningSpeech) {
-            console.log('[VAD Watchdog] Speech recognition inactive during session — restarting...');
+        if (isSessionActive && currentAgentState === 'listening' && !isSpeakingAudio && !isProcessingSpeech && !isListeningSpeech) {
+            console.log('[VAD Watchdog] Speech recognition inactive during listening state — restarting...');
             startSpeechListening();
         }
     }, 2000);
@@ -768,7 +767,10 @@ function stopKeepAliveWatchdog() {
 }
 
 function startSpeechListening() {
-    if (speechRecognition && !isListeningSpeech && !isSpeakingAudio) {
+    if (!isSessionActive || isSpeakingAudio || isProcessingSpeech || (currentAgentState !== 'listening' && currentAgentState !== 'interrupted')) {
+        return;
+    }
+    if (speechRecognition && !isListeningSpeech) {
         try {
             speechRecognition.lang = conversationLang;
             speechRecognition.start();
@@ -785,13 +787,11 @@ function startSpeechListening() {
 }
 
 function stopSpeechListening() {
-    if (speechRecognition && isListeningSpeech) {
+    if (speechRecognition) {
         try {
-            speechRecognition.stop();
-            isListeningSpeech = false;
-        } catch (e) {
-            isListeningSpeech = false;
-        }
+            speechRecognition.abort();
+        } catch (e) {}
+        isListeningSpeech = false;
     }
 }
 

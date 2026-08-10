@@ -162,11 +162,14 @@ class AgentOrchestrator:
 
             session = await session_store.get_session(self.session_id)
 
-            # Post-escalation backstop: if a ticket was already opened in this session, don't repeat creation
+            # Post-escalation backstop: if a ticket was opened, handle closing or explicit ticket status questions,
+            # but allow any new questions/topics spoken by the user to be processed normally.
             if session.get("has_escalated"):
                 existing_ticket_id = session.get("created_ticket_id", "TICK-ACTIVE")
                 is_hi = _is_hindi(user_text)
-                if _is_affirmative_text(user_text) or any(kw in user_text.lower() for kw in ["bye", "thanks", "thank you", "done", "close", "ok", "okay"]):
+                user_lower = user_text.strip().lower()
+
+                if _is_affirmative_text(user_text) or any(kw in user_lower for kw in ["bye", "thanks", "thank you", "done", "close", "ok", "okay", "that's all", "thats all", "nothing else"]):
                     await session_store.set_state(self.session_id, "speaking")
                     await self.send_ws_event({"type": "state_change", "state": "speaking"})
                     farewell = random.choice(FAREWELL_MESSAGES_HI if is_hi else FAREWELL_MESSAGES_EN)
@@ -174,22 +177,21 @@ class AgentOrchestrator:
                     await self.send_ws_event({"type": "session_end"})
                     logger.info(f"[latency] TOTAL turn (post-escalation close): {(time.monotonic() - turn_started) * 1000:.0f}ms")
                     return
-                elif any(kw in user_text.lower() for kw in ["new", "other", "another", "nayi", "dusri"]):
-                    # Reset escalation state so user can ask a new question
-                    await session_store.update_session(self.session_id, {
-                        "has_escalated": False,
-                        "created_ticket_id": None,
-                        "kb_topic_articles": None
-                    })
-                else:
+                elif any(kw in user_lower for kw in ["ticket status", "ticket number", "my ticket", "ticket id"]):
                     await session_store.set_state(self.session_id, "speaking")
                     await self.send_ws_event({"type": "state_change", "state": "speaking"})
-                    reply = (f"आपका एस्केलेशन टिकट {existing_ticket_id} एक्टिव है। आईटी टीम आपसे संपर्क करेगी। क्या मैं यह सेशन बंद कर दूँ?" if is_hi
-                             else f"Your escalation ticket {existing_ticket_id} is active. IT support will contact you shortly. Would you like me to close this session now?")
-                    await session_store.update_session(self.session_id, {"awaiting_close_confirmation": True})
+                    reply = (f"आपका एस्केलेशन टिकट {existing_ticket_id} एक्टिव है। आईटी टीम आपसे जल्द ही संपर्क करेगी।" if is_hi
+                             else f"Your escalation ticket {existing_ticket_id} is active and assigned to IT support. They will contact you shortly.")
                     await self._stream_spoken_response(reply)
-                    logger.info(f"[latency] TOTAL turn (post-escalation prompt): {(time.monotonic() - turn_started) * 1000:.0f}ms")
+                    logger.info(f"[latency] TOTAL turn (post-escalation ticket status): {(time.monotonic() - turn_started) * 1000:.0f}ms")
                     return
+                else:
+                    # User is asking a new question or different issue — clear old KB topic cache so fresh RAG & LLM processing occurs
+                    await session_store.update_session(self.session_id, {
+                        "kb_topic_articles": None,
+                        "current_kb_id": None,
+                        "current_step_index": 0
+                    })
 
             # Deterministic backstop: if we asked "are you fully done?" last turn, don't
             # rely on the LLM to reliably call the end_session tool on this turn — it's a
@@ -287,12 +289,14 @@ class AgentOrchestrator:
                             ticket_id = tool_result["ticket"]["ticket_id"]
 
                             spoken_reply = f"I have escalated your issue to IT support. Ticket {ticket_id} has been opened and a technician will contact you shortly."
+                            await session_store.add_turn(self.session_id, "assistant", spoken_reply)
                             await self._stream_spoken_response(spoken_reply)
                             logger.info(f"[latency] TOTAL turn: {(time.monotonic() - turn_started) * 1000:.0f}ms")
                             return
 
                         elif name == "end_session":
                             farewell = args.get("farewell_message") or random.choice(FAREWELL_MESSAGES)
+                            await session_store.add_turn(self.session_id, "assistant", farewell)
                             await self._stream_spoken_response(farewell)
                             await self.send_ws_event({"type": "session_end"})
                             logger.info(f"[latency] TOTAL turn: {(time.monotonic() - turn_started) * 1000:.0f}ms")
@@ -399,8 +403,9 @@ class AgentOrchestrator:
         # 3. Explicit Topic Keywords Detection
         TOPIC_KEYWORDS = [
             "wifi", "wi-fi", "wireless", "vpn", "password", "passcode", "mfa", "2fa",
-            "authenticator", "printer", "print", "disk", "storage", "outlook", "email",
-            "teams", "vdi", "citrix", "rdp", "slow", "lag", "performance"
+            "authenticator", "keyboard", "key", "keys", "typing", "printer", "print",
+            "disk", "storage", "outlook", "email", "teams", "vdi", "citrix", "rdp",
+            "slow", "lag", "performance"
         ]
 
         has_explicit_topic = any(kw in user_lower for kw in TOPIC_KEYWORDS)
@@ -461,10 +466,15 @@ class AgentOrchestrator:
         """
         target_client = client or self.openai_client
         llm_request_sent = time.monotonic()
+
+        session = await session_store.get_session(self.session_id)
+        has_escalated = session.get("has_escalated", False)
+        tools = [END_SESSION_TOOL_SPEC] if has_escalated else [CREATE_TICKET_TOOL_SPEC, END_SESSION_TOOL_SPEC]
+
         stream = await target_client.chat.completions.create(
             model=model,
             messages=messages,
-            tools=[CREATE_TICKET_TOOL_SPEC, END_SESSION_TOOL_SPEC],
+            tools=tools,
             tool_choice="auto",
             temperature=0.4,
             max_tokens=80,

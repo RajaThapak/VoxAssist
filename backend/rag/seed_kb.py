@@ -48,6 +48,18 @@ SEED_KB_ARTICLES = [
         ]
     },
     {
+        "id": "kb_kbd_01",
+        "title": "Keyboard unresponsive, keys stuck, or typing delay troubleshooting",
+        "category": "Hardware",
+        "keywords": ["keyboard", "key", "keys", "typing", "type", "stuck", "unresponsive", "buttons"],
+        "steps": [
+            "Unplug the USB keyboard cable or toggle the wireless Bluetooth power switch off and back on.",
+            "Test typing in a basic app like Notepad to check if the issue is system-wide or specific to one application.",
+            "Open Device Manager (devmgmt.msc), expand 'Keyboards', right-click your keyboard device and select 'Uninstall device', then restart your computer.",
+            "Check for stuck physical keys or clean beneath keycaps with compressed air."
+        ]
+    },
+    {
         "id": "kb_print_01",
         "title": "Printer offline, missing driver, or stuck print queue",
         "category": "Hardware",
